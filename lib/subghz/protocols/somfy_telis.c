@@ -632,7 +632,7 @@ static void subghz_protocol_somfy_telis_check_remote_controller(SubGhzBlockGener
     subghz_custom_btn_set_max(3);
 }
 
-/** 
+ /** 
  * Get button name.
  * @param btn Button number, 4 bit
  */
@@ -769,18 +769,15 @@ void subghz_protocol_decoder_somfy_telis_get_string(void* context, FuriString* o
 
     furi_string_cat_printf(
         output,
-        "%s %db\r\n"
+        "%s %dbit\r\n"
         "Key:0x%lX%08lX\r\n"
-        "Sn:0x%06lX \r\n"
-        "Cnt:%04lX\r\n"
-        "Btn:%X - %s\r\n",
-
+        "SN:0x%lX Btn:[%s]\r\n"
+        "Cnt:%04lX",
         instance->generic.protocol_name,
         instance->generic.data_count_bit,
         (uint32_t)(instance->generic.data >> 32),
         (uint32_t)instance->generic.data,
         instance->generic.serial,
-        instance->generic.cnt,
-        instance->generic.btn,
-        subghz_protocol_somfy_telis_get_name_button(instance->generic.btn));
+        subghz_protocol_somfy_telis_get_name_button(instance->generic.btn),
+        instance->generic.cnt);
 }

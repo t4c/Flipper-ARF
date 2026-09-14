@@ -6,6 +6,8 @@
 #include "../blocks/generic.h"
 #include "../blocks/math.h"
 
+#include "../blocks/custom_btn_i.h"
+
 #define TAG "SubGhzProtocolLinear"
 
 #define DIP_PATTERN "%c%c%c%c%c%c%c%c%c%c"
@@ -163,6 +165,11 @@ SubGhzProtocolStatus
         // Optional value
         flipper_format_read_uint32(
             flipper_format, "Repeat", (uint32_t*)&instance->encoder.repeat, 1);
+
+        // Linear uses a fixed DIP-switch code (no distinct button values).
+        // Enable the D-pad so it is shown, but every direction re-sends the
+        // originally captured code unchanged (do not touch generic.data).
+        subghz_custom_btn_set_max(4);
 
         if(!subghz_protocol_encoder_linear_get_upload(instance)) {
             ret = SubGhzProtocolStatusErrorEncoderGetUpload;
@@ -326,20 +333,11 @@ void subghz_protocol_decoder_linear_get_string(void* context, FuriString* output
     // only the display here is inverted (~) to show correct values.
     uint32_t code_found_lo = ~instance->generic.data & 0x00000000000003ff;
 
-    uint64_t code_found_reverse = subghz_protocol_blocks_reverse_key(
-        ~instance->generic.data, instance->generic.data_count_bit);
-
-    uint32_t code_found_reverse_lo = code_found_reverse & 0x00000000000003ff;
-
     furi_string_cat_printf(
         output,
         "%s %dbit\r\n"
-        "Key:0x%03lX\r\n"
-        "Yek:0x%03lX\r\n"
-        "DIP:" DIP_PATTERN "\r\n",
+        "Key:0x%03lX\r\n",
         instance->generic.protocol_name,
         instance->generic.data_count_bit,
-        code_found_lo,
-        code_found_reverse_lo,
-        DATA_TO_DIP(code_found_lo));
+        code_found_lo);
 }

@@ -67,6 +67,7 @@
 #include "fiat_v1.h"
 #include "fiat_v2.h"
 #include "renault_v0.h"
+#include "renault_v1.h"
 #include "bmw_cas4.h"
 #include "subaru.h"
 #include "kia_generic.h"
@@ -93,6 +94,12 @@
 #include "honda_static.h"
 #include "honda_v1.h"
 #include "honda_v2.h"
+
+// [UNLEASHED_PORT] New protocols from Unleashed firmware
+#include "allstar_firefly.h"
+#include "ditec_gol4.h"
+#include "nord_ice.h"
+#include "telcoma_edge.h"
 
 #include <stdbool.h>
 #include <stddef.h>

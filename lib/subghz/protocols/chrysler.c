@@ -4,6 +4,8 @@
 #include "../blocks/encoder.h"
 #include "../blocks/generic.h"
 #include "../blocks/math.h"
+// [PROTOPIRATE_PORT] custom_btn support
+#include "../blocks/custom_btn_i.h"
 
 #include <string.h>
 
@@ -219,6 +221,13 @@ static void chrysler_v0_decode_packet(SubGhzProtocolDecoderChrysler* instance) {
     }
 
     instance->generic.btn = instance->decoded_button;
+
+    // [PROTOPIRATE_PORT] custom_btn support
+    // Chrysler supports 2 buttons: Up=0x1 (Lock), OK=0x2 (Unlock)
+    if(subghz_custom_btn_get_original() == 0) {
+        subghz_custom_btn_set_original(instance->generic.btn);
+    }
+    subghz_custom_btn_set_max(2);
 }
 
 static void chrysler_v0_decoder_commit(SubGhzProtocolDecoderChrysler* instance) {
@@ -323,7 +332,9 @@ LevelDuration subghz_protocol_encoder_chrysler_yield(void* context) {
     }
     LevelDuration ret = instance->encoder.upload[instance->encoder.front];
     if(++instance->encoder.front == instance->encoder.size_upload) {
-        instance->encoder.repeat--;
+        // Endless/breakless TX: while OK is held (endless_tx set by the transmit
+        // scene) do not consume repeats, so the signal loops until release.
+        if(!subghz_block_generic_global.endless_tx) instance->encoder.repeat--;
         instance->encoder.front = 0;
     }
     return ret;
@@ -476,6 +487,28 @@ SubGhzProtocolStatus
     uint8_t tx_button = original_button;
     if(btn_u32 == 1U || btn_u32 == 2U) {
         tx_button = (uint8_t)btn_u32;
+    }
+
+    // [PROTOPIRATE_PORT] custom_btn support
+    // Chrysler mapping: Up=0x1 (Lock), OK=0x2 (Unlock)
+    // custom_btn_id=OK returns original; UP/DOWN override tx_button.
+    {
+        if(subghz_custom_btn_get_original() == 0) {
+            subghz_custom_btn_set_original(original_button);
+        }
+        subghz_custom_btn_set_max(2);
+        uint8_t custom_btn_id = subghz_custom_btn_get();
+        switch(custom_btn_id) {
+        case SUBGHZ_CUSTOM_BTN_UP:
+            tx_button = 0x1U;
+            break;
+        case SUBGHZ_CUSTOM_BTN_OK:
+        default:
+            // [BUGFIX] OK is the default state after loading a .sub. Replay
+            // the original captured button rather than force a specific one.
+            tx_button = original_button;
+            break;
+        }
     }
 
     instance->tx_button = tx_button;
@@ -808,31 +841,33 @@ void subghz_protocol_decoder_chrysler_get_string(void* context, FuriString* outp
 
     furi_string_cat_printf(
         output,
-        "%s %dbit\r\n%016llX%04X\r\n",
+        "%s %dbit\r\n"
+        "Key:0x%016llX\r\n",
         instance->generic.protocol_name,
         instance->packet_bit_count,
-        instance->generic.data,
-        instance->data_2);
+        (unsigned long long)instance->generic.data);
 
     if(instance->plain_a_present) {
         if(instance->plain_b_present) {
             furi_string_cat_printf(
                 output,
-                "SnA:%08lX\r\nSnB:%08lX\r\n",
-                instance->generic.cnt,
-                chrysler_v0_get_sn_b(instance));
+                "SnA:%08lX SnB:%08lX\r\n",
+                (unsigned long)instance->generic.cnt,
+                (unsigned long)chrysler_v0_get_sn_b(instance));
         } else {
-            furi_string_cat_printf(output, "SnA:%08lX\r\n", instance->generic.cnt);
+            furi_string_cat_printf(
+                output, "SN:0x%08lX\r\n", (unsigned long)instance->generic.cnt);
         }
     } else if(instance->plain_b_present) {
-        furi_string_cat_printf(output, "SnB:%08lX\r\n", chrysler_v0_get_sn_b(instance));
+        furi_string_cat_printf(
+            output, "SN:0x%08lX\r\n", (unsigned long)chrysler_v0_get_sn_b(instance));
     }
 
     furi_string_cat_printf(
         output,
-        "Btn:%02X [%s] Cnt:%02X\r\nChk:%s",
-        instance->decoded_button,
+        "Btn:[%s]\r\n"
+        "CRC:%s Cnt:%02X",
         chrysler_v0_get_button_name(instance->decoded_button),
-        instance->seed,
-        instance->check_ok ? "OK" : "ERR");
+        instance->check_ok ? "OK" : "ERR",
+        instance->seed);
 }

@@ -5,6 +5,8 @@
 #include "../blocks/encoder.h"
 #include "../blocks/generic.h"
 #include "../blocks/math.h"
+// [PROTOPIRATE_PORT] custom_btn support
+#include "../blocks/custom_btn_i.h"
 #include <lib/toolbox/manchester_decoder.h>
 #include <string.h>
 
@@ -398,7 +400,9 @@ LevelDuration subghz_protocol_encoder_ford_v0_yield(void* context) {
     LevelDuration ret = instance->encoder.upload[instance->encoder.front];
 
     if(++instance->encoder.front == instance->encoder.size_upload) {
-        instance->encoder.repeat--;
+        // Endless/breakless TX: while OK is held (endless_tx set by the transmit
+        // scene) do not consume repeats, so the signal loops until release.
+        if(!subghz_block_generic_global.endless_tx) instance->encoder.repeat--;
         instance->encoder.front = 0;
     }
 
@@ -530,6 +534,28 @@ SubGhzProtocolStatus
         flipper_format_read_uint32(flipper_format, "Btn", &btn, 1);
         flipper_format_read_uint32(flipper_format, "Cnt", &cnt, 1);
         if(serial == UINT32_MAX || btn == UINT32_MAX || cnt == UINT32_MAX) break;
+
+        // [PROTOPIRATE_PORT] custom_btn support
+        // Ford mapping: Left=0x1, Up=0x2, OK=0x4, Down=0x8, Right=0x10
+        {
+            const uint8_t original_btn = (uint8_t)btn;
+            if(subghz_custom_btn_get_original() == 0) {
+                subghz_custom_btn_set_original(original_btn);
+            }
+            subghz_custom_btn_set_max(5);
+            uint8_t custom_btn_id = subghz_custom_btn_get();
+            switch(custom_btn_id) {
+            case SUBGHZ_CUSTOM_BTN_UP:    btn = 0x02U; break;
+            // [BUGFIX] OK is the default state after loading a .sub; do not
+            // rewrite the button unconditionally or the receiver will get a
+            // different button code than the one captured.
+            case SUBGHZ_CUSTOM_BTN_OK:    btn = original_btn; break;
+            case SUBGHZ_CUSTOM_BTN_DOWN:  btn = 0x08U; break;
+            case SUBGHZ_CUSTOM_BTN_LEFT:  btn = 0x01U; break;
+            case SUBGHZ_CUSTOM_BTN_RIGHT: btn = 0x10U; break;
+            default:                      btn = original_btn; break;
+            }
+        }
 
         instance->serial = serial;
         instance->button = (uint8_t)btn;
@@ -851,9 +877,31 @@ SubGhzProtocolStatus
         instance->generic.serial = instance->serial;
         instance->generic.btn = instance->button;
         instance->generic.cnt = instance->count;
+
+        // [PROTOPIRATE_PORT] custom_btn support
+        // Ford mapping: Left=0x1, Up=0x2, OK=0x4, Down=0x8, Right=0x10 (5 buttons)
+        if(subghz_custom_btn_get_original() == 0) {
+            subghz_custom_btn_set_original(instance->generic.btn);
+        }
+        subghz_custom_btn_set_max(5);
     }
 
     return ret;
+}
+
+static const char* ford_v0_get_button_name(uint8_t button) {
+    switch(button) {
+    case 0x01:
+        return "Panic";
+    case 0x02:
+        return "Lock";
+    case 0x04:
+        return "Unlock";
+    case 0x08:
+        return "Boot";
+    default:
+        return "??";
+    }
 }
 
 void subghz_protocol_decoder_ford_v0_get_string(void* context, FuriString* output) {
@@ -865,37 +913,18 @@ void subghz_protocol_decoder_ford_v0_get_string(void* context, FuriString* outpu
 
     bool crc_ok = ford_v0_verify_crc(instance->key1, instance->key2);
 
-    const char* button_name = "??";
-    if(instance->button == 0x01)
-        button_name = "Panic";
-    else if(instance->button == 0x02)
-        button_name = "Lock";
-    else if(instance->button == 0x04)
-        button_name = "Unlock";
-    else if(instance->button == 0x08)
-        button_name = "Boot";
-
     furi_string_cat_printf(
         output,
-        "%s %dbit CRC:%s\r\n"
-        "Key1: %08lX%08lX\r\n"
-        "Key2: %04X"
-        "  Sn: %08lX\r\n"
-        "Cnt: %05lX"
-        "  Checksum: %02X"
-        "  CRC: %02X\r\n"
-        "  Btn: %02X - %s\r\n",
+        "%s %dbit\r\n"
+        "Key:0x%08lX%08lX\r\n"
+        "SN:0x%lX Btn:[%s]\r\n"
+        "CRC:%s Cnt:%05lX\r\n",
         instance->generic.protocol_name,
         instance->generic.data_count_bit,
-        crc_ok ? "OK" : "BAD",
         (unsigned long)code_found_hi,
         (unsigned long)code_found_lo,
-        instance->key2,
         (unsigned long)instance->serial,
-
-        (unsigned long)instance->count,
-        (instance->key2 >> 8) & 0xFF,
-        instance->key2 & 0xFF,
-        instance->button,
-        button_name);
+        ford_v0_get_button_name(instance->button),
+        crc_ok ? "OK" : "BAD",
+        (unsigned long)instance->count);
 }

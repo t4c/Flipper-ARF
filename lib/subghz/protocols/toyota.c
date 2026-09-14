@@ -49,11 +49,15 @@
  * Physical constants — Variant A
  * ---------------------------------------------------------------- */
 
+// [FALSE_POSITIVE_FIX] te_delta reduced from 175 (43.8%) to 100 (25% of te_short)
+// to eliminate huge overlap with other 250/500us OOK automotive protocols (KIA,
+// PSA, Honda v2). min_count_bit_for_found raised from 60 to TOYOTA_A_BITS (68)
+// so truncated frames of other protocols cannot fire the callback prematurely.
 static const SubGhzBlockConst toyota_const_a = {
     .te_short                = 400,
     .te_long                 = 800,
-    .te_delta                = 175,
-    .min_count_bit_for_found = 60,
+    .te_delta                = 100,
+    .min_count_bit_for_found = 68,
 };
 
 /* ----------------------------------------------------------------
@@ -61,11 +65,16 @@ static const SubGhzBlockConst toyota_const_a = {
  * Data phase uses midpoint, not these tolerances.
  * ---------------------------------------------------------------- */
 
+// [FALSE_POSITIVE_FIX] te_delta reduced from 120 (60%!) to 60 (30% of te_short).
+// The old 120us delta caused short/long windows to overlap in 270-320us and let
+// most OOK automotive protocols (KIA 250/500, PSA 250/500, Renault 125/250,
+// Honda v2 250/500) trigger the Variant B state machine and produce garbage
+// 67-bit frames. min_count_bit_for_found raised from 60 to TOYOTA_B_BITS (67).
 static const SubGhzBlockConst toyota_const_b = {
     .te_short                = 200,
     .te_long                 = 390,
-    .te_delta                = 120,
-    .min_count_bit_for_found = 60,
+    .te_delta                = 60,
+    .min_count_bit_for_found = 67,
 };
 
 /*
@@ -78,15 +87,27 @@ static const SubGhzBlockConst toyota_const_b = {
 #define TOYOTA_B_NRZ_MIDPOINT   287u
 
 /* Sync gap: LOW pulse separating preamble from data */
-#define TOYOTA_B_SYNC_GAP_MIN   1500u
-#define TOYOTA_B_SYNC_GAP_MAX   2600u
+// [FALSE_POSITIVE_FIX] window narrowed from 1100us (1500-2600) to 500us
+// (1700-2200) centered on the real ~1938us gap of Tundra fobs. The old window
+// happily accepted long silences from any other protocol.
+#define TOYOTA_B_SYNC_GAP_MIN   1700u
+#define TOYOTA_B_SYNC_GAP_MAX   2200u
 
 /* Any pulse above this is an inter-frame gap */
 #define TOYOTA_INTER_FRAME_GAP  5000u
 
-/* Minimum preamble pairs before accepting sync gap */
-#define TOYOTA_B_PREAMBLE_MIN   6u
-#define TOYOTA_A_PREAMBLE_MIN   6u
+// [FALSE_POSITIVE_FIX] Minimum preamble pairs raised from 6 to 10.
+// Real Toyota fobs transmit ~15-20+ preamble pairs; other automotive
+// protocols rarely have 10+ consecutive matching short-pulse pairs.
+#define TOYOTA_B_PREAMBLE_MIN   10u
+#define TOYOTA_A_PREAMBLE_MIN   10u
+
+// [FALSE_POSITIVE_FIX] Bounds for individual pulses accepted during Variant B
+// data phase (NRZ). Real Tundra pulses are ~200us (bit 0) or ~390us (bit 1).
+// Anything outside a generous 100-500us window is almost certainly a foreign
+// protocol pulse; reject and reset instead of silently coercing to a bit.
+#define TOYOTA_B_DATA_PULSE_MIN 100u
+#define TOYOTA_B_DATA_PULSE_MAX 500u
 
 /* Frame lengths in bits */
 #define TOYOTA_A_BITS  68u
@@ -94,6 +115,18 @@ static const SubGhzBlockConst toyota_const_b = {
 
 /* First HIGH duration below this -> Variant B, above -> Variant A */
 #define TOYOTA_VARIANT_THRESH  310u
+
+// [FALSE_POSITIVE_FIX] Kia/Hyundai V3/V4 shares Variant A's 400/800us PWM
+// timing, its ~12 short-pair preamble, and its 68-bit length, so a Kia burst
+// used to sail straight through the Variant A decoder. The one structural
+// feature that distinguishes them is Kia's mandatory ~1000-1500us sync pulse
+// between preamble and data: genuine Toyota Variant A has NO such gap (it goes
+// straight from SS preamble pairs to LS/SL data pairs, where no single level
+// ever exceeds te_long+te_delta = 900us). Any level in this band during the
+// Variant A preamble/data phase is therefore a Kia-style sync gap (or other
+// foreign framing) and must abort, never be treated as end-of-preamble.
+#define TOYOTA_A_KIA_SYNC_MIN  901u
+#define TOYOTA_A_KIA_SYNC_MAX  1600u
 
 /* ----------------------------------------------------------------
  * Button codes
@@ -238,6 +271,30 @@ static const char* toyota_model_name(uint8_t variant) {
     return (variant == 1) ? "Tundra" : "Corolla";
 }
 
+// [FALSE_POSITIVE_FIX] Plausibility check for decoded fields. Rejects frames
+// with impossible serial/button values that are almost certainly the byproduct
+// of another protocol's stream mis-parsed as Toyota.
+static bool toyota_frame_plausible(uint32_t serial, uint8_t button, uint32_t hop, uint8_t variant) {
+    // Serial: reject all-zeros and all-ones (28-bit field, mask 0x0FFFFFFF).
+    if(serial == 0U || serial == 0x0FFFFFFFU) return false;
+
+    // Hop: reject all-zeros and all-ones (obvious RF idle / noise).
+    if(hop == 0U || hop == 0xFFFFFFFFU) return false;
+
+    // Button must belong to the closed set of Toyota-observed codes.
+    const uint8_t b = button & 0x0FU;
+    if(variant == 1U) {
+        // Tundra variant B: Lock=0x0A, Unlock=0x05, L+U=0x0F, Trunk=0x04
+        if(b != TOYOTA_B_BTN_LOCK && b != TOYOTA_B_BTN_UNLOCK &&
+           b != 0x0FU && b != 0x04U) return false;
+    } else {
+        // Corolla variant A: Lock=0x08, Unlock=0x01, L+U=0x09, Trunk=0x02, Aux=0x04
+        if(b != TOYOTA_A_BTN_LOCK && b != TOYOTA_A_BTN_UNLOCK &&
+           b != 0x09U && b != 0x02U && b != 0x04U) return false;
+    }
+    return true;
+}
+
 /* ----------------------------------------------------------------
  * Decode and fire callback
  * ---------------------------------------------------------------- */
@@ -251,6 +308,16 @@ static void toyota_decode_and_fire(SubGhzProtocolDecoderToyota* inst) {
     inst->hop    = toyota_extract(inst,  0, 32);
     inst->serial = toyota_extract(inst, 32, 28);
     inst->button = (uint8_t)toyota_extract(inst, 60, 4);
+
+    // [FALSE_POSITIVE_FIX] Reject frames with implausible fields BEFORE firing.
+    // This is the last line of defence against foreign-protocol garbage that
+    // happened to survive the timing checks.
+    if(!toyota_frame_plausible(inst->serial, inst->button, inst->hop, inst->variant)) {
+        FURI_LOG_D(TAG, "REJECT: implausible serial=%08lX btn=%X hop=%08lX var=%d",
+            (unsigned long)inst->serial, (unsigned int)inst->button,
+            (unsigned long)inst->hop, (int)inst->variant);
+        return;
+    }
 
     inst->generic.data =
         ((uint64_t)inst->hop    << 32) |
@@ -338,6 +405,14 @@ static void toyota_feed_variant_a(
         }
         inst->have_high = false;
 
+        // [FALSE_POSITIVE_FIX] Reject Kia/Hyundai V3/V4 sync gap. A ~1000-1500us
+        // LOW here is Kia's preamble->data sync pulse, not a Toyota bit pair.
+        // Genuine Toyota Variant A never produces a single level this long.
+        if(duration >= TOYOTA_A_KIA_SYNC_MIN && duration <= TOYOTA_A_KIA_SYNC_MAX) {
+            subghz_protocol_decoder_toyota_reset(inst);
+            return;
+        }
+
         bool hs = te_is_short(inst->te_last, c);
         bool hl = te_is_long (inst->te_last, c);
         bool ls = te_is_short(duration, c);
@@ -349,6 +424,14 @@ static void toyota_feed_variant_a(
         }
 
         if(inst->preamble_count < TOYOTA_A_PREAMBLE_MIN) {
+            subghz_protocol_decoder_toyota_reset(inst);
+            return;
+        }
+
+        // A valid data-phase entry must be exactly one LS or SL pair. If neither
+        // matches (e.g. a Kia HIGH sync ~1200us landed in te_last), abort rather
+        // than fall through into the data state with a bogus first bit.
+        if(!((hl && ls) || (hs && ll))) {
             subghz_protocol_decoder_toyota_reset(inst);
             return;
         }
@@ -493,6 +576,16 @@ static void toyota_feed_variant_b(
             return;
         }
 
+        // [FALSE_POSITIVE_FIX] Reject pulses clearly outside Tundra range.
+        // Real Tundra data pulses are ~200us (bit 0) or ~390us (bit 1); anything
+        // shorter than 100us or longer than 500us is almost certainly a foreign
+        // protocol (Honda v1 1000us, VAG 1000us, etc.). Silently coercing them
+        // to a bit was the root cause of most false positives.
+        if(duration < TOYOTA_B_DATA_PULSE_MIN || duration > TOYOTA_B_DATA_PULSE_MAX) {
+            subghz_protocol_decoder_toyota_reset(inst);
+            return;
+        }
+
         /*
          * NRZ bit: midpoint classification.
          * <= 287us -> bit 0
@@ -622,7 +715,6 @@ void subghz_protocol_decoder_toyota_get_string(void* context, FuriString* output
     furi_assert(context);
     SubGhzProtocolDecoderToyota* inst = context;
 
-    uint32_t hop    = (uint32_t)(inst->generic.data >> 32);
     uint32_t serial = (uint32_t)((inst->generic.data >> 4) & 0x0FFFFFFF);
     uint8_t  button = (uint8_t)(inst->generic.data & 0x0F);
     uint8_t  var    = (inst->generic.cnt != 0) ? 1 : 0;
@@ -630,13 +722,12 @@ void subghz_protocol_decoder_toyota_get_string(void* context, FuriString* output
     furi_string_cat_printf(
         output,
         "%s %dbit\r\n"
-        "Hop: %08lX\r\n"
-        "Sn:  %07lX\r\n"
-        "Btn: %X [%s]",
+        "Key:0x%lX%08lX\r\n"
+        "SN:0x%lX Btn:[%s]",
         toyota_model_name(var),
         inst->generic.data_count_bit,
-        (unsigned long)hop,
+        (uint32_t)(inst->generic.data >> 32),
+        (uint32_t)inst->generic.data,
         (unsigned long)serial,
-        button,
         toyota_button_name(button, var));
 }

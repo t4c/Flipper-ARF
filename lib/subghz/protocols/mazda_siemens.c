@@ -6,6 +6,9 @@
 #include "../blocks/generic.h"
 #include "../blocks/math.h"
 
+// [PROTOPIRATE_PORT] custom_btn support
+#include "../blocks/custom_btn_i.h"
+
 #define TAG "SubGhzProtocolMazdaSiemens"
 
 static const SubGhzBlockConst subghz_protocol_mazda_siemens_const = {
@@ -75,7 +78,7 @@ const SubGhzProtocolEncoder subghz_protocol_mazda_siemens_encoder = {
 const SubGhzProtocol subghz_protocol_mazda_siemens = {
     .name = SUBGHZ_PROTOCOL_MAZDA_SIEMENS_NAME,
     .type = SubGhzProtocolTypeStatic,
-    .flag = SubGhzProtocolFlag_433 | SubGhzProtocolFlag_FM |
+    .flag = SubGhzProtocolFlag_315 | SubGhzProtocolFlag_433 | SubGhzProtocolFlag_FM |
             SubGhzProtocolFlag_Decodable | SubGhzProtocolFlag_Load |
             SubGhzProtocolFlag_Save | SubGhzProtocolFlag_Send,
 
@@ -206,19 +209,6 @@ static void mazda_xor_obfuscate(uint8_t* data) {
     }
 }
 
-static const char* mazda_get_btn_name(uint8_t btn) {
-    switch(btn) {
-    case 0x10:
-        return "Lock";
-    case 0x20:
-        return "Unlock";
-    case 0x40:
-        return "Trunk";
-    default:
-        return "Unknown";
-    }
-}
-
 // ============================================================================
 // Encoder
 // ============================================================================
@@ -341,6 +331,37 @@ SubGhzProtocolStatus
         }
         flipper_format_read_uint32(
             flipper_format, "Repeat", (uint32_t*)&instance->encoder.repeat, 1);
+
+        // [PROTOPIRATE_PORT] custom_btn support
+        // Mazda Siemens button codes (see mazda_get_btn_name):
+        //   0x10 = Lock, 0x20 = Unlock, 0x40 = Trunk.
+        // Btn occupies bits 24..31 of generic.data.
+        mazda_parse_data(&instance->generic);
+        {
+            const uint8_t original_btn = (uint8_t)instance->generic.btn;
+            if(subghz_custom_btn_get_original() == 0) {
+                subghz_custom_btn_set_original(original_btn);
+            }
+            subghz_custom_btn_set_max(4);
+            uint8_t custom_btn_id = subghz_custom_btn_get();
+            uint8_t new_btn = original_btn;
+            switch(custom_btn_id) {
+            case SUBGHZ_CUSTOM_BTN_UP:    new_btn = 0x10U; break; // Lock
+            case SUBGHZ_CUSTOM_BTN_OK:    new_btn = original_btn; break;
+            case SUBGHZ_CUSTOM_BTN_DOWN:  new_btn = 0x20U; break; // Unlock
+            case SUBGHZ_CUSTOM_BTN_LEFT:  new_btn = 0x40U; break; // Trunk
+            // Only 3 real buttons (Lock/Unlock/Trunk); RIGHT falls back to captured.
+            case SUBGHZ_CUSTOM_BTN_RIGHT: new_btn = original_btn; break;
+            default:                      new_btn = original_btn; break;
+            }
+            if(new_btn != original_btn) {
+                // Re-encode packet with new button; get_upload recomputes checksum.
+                instance->generic.btn = new_btn;
+                instance->generic.data =
+                    (instance->generic.data & ~((uint64_t)0xFFU << 24U)) |
+                    ((uint64_t)new_btn << 24U);
+            }
+        }
 
         if(!subghz_protocol_encoder_mazda_siemens_get_upload(instance)) {
             res = SubGhzProtocolStatusErrorEncoderGetUpload;
@@ -528,6 +549,19 @@ SubGhzProtocolStatus
         subghz_protocol_mazda_siemens_const.min_count_bit_for_found);
 }
 
+static const char* mazda_get_btn_name(uint8_t btn) {
+    switch(btn) {
+    case 0x10:
+        return "Lock";
+    case 0x20:
+        return "Unlock";
+    case 0x40:
+        return "Trunk";
+    default:
+        return "Unknown";
+    }
+}
+
 void subghz_protocol_decoder_mazda_siemens_get_string(void* context, FuriString* output) {
     furi_assert(context);
     SubGhzProtocolDecoderMazdaSiemens* instance = context;
@@ -537,29 +571,19 @@ void subghz_protocol_decoder_mazda_siemens_get_string(void* context, FuriString*
     subghz_block_generic_global.current_btn = instance->generic.btn;
     subghz_block_generic_global.btn_length_bit = 8;
 
-    uint8_t data[8];
-    for(int i = 0; i < 8; i++) {
-        data[i] = (instance->generic.data >> (56 - 8 * i)) & 0xFF;
-    }
+    const uint8_t chk = instance->generic.data & 0xFF;
 
     furi_string_cat_printf(
         output,
         "%s %dbit\r\n"
-        "Key:%02X %02X %02X %02X %02X %02X %02X %02X\r\n"
-        "Sn:%08lX Btn:%s\r\n"
-        "Cnt:%04lX Chk:%02X\r\n",
+        "Key:0x%llX\r\n"
+        "SN:0x%lX Btn:[%s]\r\n"
+        "CRC:%02X Cnt:%04lX\r\n",
         instance->generic.protocol_name,
         instance->generic.data_count_bit,
-        data[0],
-        data[1],
-        data[2],
-        data[3],
-        data[4],
-        data[5],
-        data[6],
-        data[7],
+        (uint64_t)instance->generic.data,
         (uint32_t)instance->generic.serial,
         mazda_get_btn_name(instance->generic.btn),
-        (uint32_t)instance->generic.cnt,
-        data[7]);
+        chk,
+        (uint32_t)instance->generic.cnt);
 }

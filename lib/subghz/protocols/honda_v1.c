@@ -4,6 +4,7 @@
 #include "../blocks/encoder.h"
 #include "../blocks/generic.h"
 #include "../blocks/math.h"
+#include "../blocks/custom_btn_i.h"
 #include <string.h>
 #include <lib/toolbox/level_duration.h>
 
@@ -539,6 +540,33 @@ SubGhzProtocolStatus
         button = HondaV1ButtonUnlock;
     }
 
+    // [PROTOPIRATE_PORT] custom_btn support
+    // Honda V1 mapping (button codes, see HondaV1Button enum):
+    //   Up    = 8  (Lock)
+    //   Down  = 0  (Unlock)
+    //   Left  = 9  (Trunk)
+    //   Right = 10 (Panic)
+    //   OK    = original captured button (byte-identical replay)
+    {
+        const uint8_t original_btn = button;
+        if(subghz_custom_btn_get_original() == 0) {
+            subghz_custom_btn_set_original(original_btn);
+        }
+        subghz_custom_btn_set_max(4);
+        uint8_t custom_btn_id = subghz_custom_btn_get();
+        switch(custom_btn_id) {
+        case SUBGHZ_CUSTOM_BTN_UP:    button = (uint8_t)HondaV1ButtonLock;   break;
+        case SUBGHZ_CUSTOM_BTN_OK:    button = original_btn;                 break;
+        case SUBGHZ_CUSTOM_BTN_DOWN:  button = (uint8_t)HondaV1ButtonUnlock; break;
+        case SUBGHZ_CUSTOM_BTN_LEFT:  button = (uint8_t)HondaV1ButtonTrunk;  break;
+        case SUBGHZ_CUSTOM_BTN_RIGHT: button = (uint8_t)HondaV1ButtonPanic;  break;
+        default:                      button = original_btn;                 break;
+        }
+        if(!honda_v1_button_valid(button)) {
+            button = original_btn;
+        }
+    }
+
     instance->generic.serial = serial;
     instance->generic.btn = button;
     instance->generic.cnt = cnt & HONDA_V1_COUNTER_MASK;
@@ -626,7 +654,9 @@ LevelDuration subghz_protocol_encoder_honda_v1_yield(void* context) {
     LevelDuration duration = instance->encoder.upload[instance->encoder.front];
 
     if(++instance->encoder.front == instance->encoder.size_upload) {
-        instance->encoder.repeat--;
+        // Endless/breakless TX: while OK is held (endless_tx set by the transmit
+        // scene) do not consume repeats, so the signal loops until release.
+        if(!subghz_block_generic_global.endless_tx) instance->encoder.repeat--;
         instance->encoder.front = 0;
     }
 
@@ -794,15 +824,14 @@ void subghz_protocol_decoder_honda_v1_get_string(void* context, FuriString* outp
         output,
         "%s %dbit\r\n"
         "Key:%016llX\r\n"
-        "Btn:%s\r\n"
-        "Sn:%07lX Cnt:%04lX\r\n"
-        "Crc:%X [%s]",
+        "SN:%07lX Btn:[%s]\r\n"
+        "CRC:%X [%s] Cnt:%04lX",
         instance->generic.protocol_name,
         (int)instance->generic.data_count_bit,
         (unsigned long long)instance->generic.data,
-        honda_v1_button_name((uint8_t)instance->generic.btn),
         (unsigned long)instance->generic.serial,
-        (unsigned long)instance->generic.cnt,
+        honda_v1_button_name((uint8_t)instance->generic.btn),
         k2,
-        crc_ok ? "OK" : "ERR");
+        crc_ok ? "OK" : "ERR",
+        (unsigned long)instance->generic.cnt);
 }

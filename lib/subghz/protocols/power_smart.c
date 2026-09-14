@@ -7,6 +7,8 @@
 #include "../blocks/generic.h"
 #include "../blocks/math.h"
 
+#include "../blocks/custom_btn_i.h"
+
 #define TAG "SubGhzProtocolPowerSmart"
 
 #define POWER_SMART_PACKET_HEADER      0xFD000000AA000000
@@ -211,6 +213,14 @@ SubGhzProtocolStatus
             flipper_format, "Repeat", (uint32_t*)&instance->encoder.repeat, 1);
 
         subghz_protocol_power_smart_remote_controller(&instance->generic);
+
+        // The button (K1/K2) is spread across the 64-bit frame and mirrored by
+        // inverted copies protected by the check_valid() consistency test. Safely
+        // re-encoding a different button would require rebuilding those inverted
+        // fields, so we only enable the D-pad (each direction re-sends the
+        // originally captured button) without touching the frame contents.
+        subghz_custom_btn_set_max(4);
+
         subghz_protocol_encoder_power_smart_get_upload(instance);
         instance->encoder.front = 0; // reset before start
         instance->encoder.is_running = true;
@@ -332,12 +342,6 @@ void subghz_protocol_decoder_power_smart_feed(
     }
 }
 
-static const char* subghz_protocol_power_smart_get_name_button(uint8_t btn) {
-    btn &= 0x3;
-    const char* name_btn[0x4] = {"Unknown", "Down", "Up", "Stop"};
-    return name_btn[btn];
-}
-
 uint8_t subghz_protocol_decoder_power_smart_get_hash_data(void* context) {
     furi_assert(context);
     SubGhzProtocolDecoderPowerSmart* instance = context;
@@ -364,6 +368,12 @@ SubGhzProtocolStatus
         subghz_protocol_power_smart_const.min_count_bit_for_found);
 }
 
+static const char* subghz_protocol_power_smart_get_name_button(uint8_t btn) {
+    btn &= 0x3;
+    const char* name_btn[0x4] = {"Unknown", "Down", "Up", "Stop"};
+    return name_btn[btn];
+}
+
 void subghz_protocol_decoder_power_smart_get_string(void* context, FuriString* output) {
     furi_assert(context);
     SubGhzProtocolDecoderPowerSmart* instance = context;
@@ -377,16 +387,13 @@ void subghz_protocol_decoder_power_smart_get_string(void* context, FuriString* o
 
     furi_string_cat_printf(
         output,
-        "%s %db\r\n"
+        "%s %dbit\r\n"
         "Key:0x%lX%08lX\r\n"
-        "Sn:0x%07lX \r\n"
-        "Btn:%s\r\n"
-        "Channel:" CHANNEL_PATTERN "\r\n",
+        "SN:0x%lX Btn:[%s]\r\n",
         instance->generic.protocol_name,
         instance->generic.data_count_bit,
         (uint32_t)(instance->generic.data >> 32),
         (uint32_t)(instance->generic.data & 0xFFFFFFFF),
         instance->generic.serial,
-        subghz_protocol_power_smart_get_name_button(instance->generic.btn),
-        CNT_TO_CHANNEL(instance->generic.cnt));
+        subghz_protocol_power_smart_get_name_button(instance->generic.btn));
 }

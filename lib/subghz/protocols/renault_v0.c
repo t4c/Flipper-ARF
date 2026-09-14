@@ -6,6 +6,9 @@
 #include "../blocks/math.h"
 #include <lib/toolbox/level_duration.h>
 
+// [PROTOPIRATE_PORT] custom_btn support
+#include "../blocks/custom_btn_i.h"
+
 #define RENAULT_V0_MIN_BITS           0x52U
 #define RENAULT_V0_DECODER_BIT_LIMIT  0x6DU
 #define RENAULT_V0_SYNC_MIN_US        0x320U
@@ -190,12 +193,9 @@ static const RenaultV0TypeEntry* renault_v0_find_type_by_checks(
     uint32_t key2,
     bool* c1_ok,
     bool* c2_ok);
-static bool renault_v0_checksum_hi2xor_valid(uint8_t hi2xor);
-static bool renault_v0_button_valid_generic(uint8_t button);
 static bool renault_v0_preamble_bits_valid(uint8_t preamble_bits);
 static uint8_t renault_v0_default_preamble_bits(RenaultV0TypeId type_id);
 static bool renault_v0_type_preamble_bits_valid(RenaultV0TypeId type_id, uint8_t preamble_bits);
-static const char* renault_v0_get_button_name(RenaultV0TypeId type_id, uint8_t button);
 static void renault_v0_parse_fields(uint64_t data, uint32_t* serial, uint8_t* button, uint8_t* counter);
 static void renault_v0_build_key(
     uint32_t serial,
@@ -362,26 +362,6 @@ static const RenaultV0TypeEntry* renault_v0_find_type_by_checks(
     return NULL;
 }
 
-static bool renault_v0_checksum_hi2xor_valid(uint8_t hi2xor) {
-    return (hi2xor == 0x00U) || (hi2xor == 0x03U);
-}
-
-static bool renault_v0_button_valid_generic(uint8_t button) {
-    if((button == 0x06U) || (button == 0x0AU)) {
-        return true;
-    }
-    if((button >= 0x04U) && (button <= 0x0BU)) {
-        return true;
-    }
-    if((button >= 0x44U) && (button <= 0x4BU)) {
-        return true;
-    }
-    if((button >= 0xC4U) && (button <= 0xCBU)) {
-        return true;
-    }
-    return false;
-}
-
 static bool renault_v0_preamble_bits_valid(uint8_t preamble_bits) {
     switch(preamble_bits) {
     case 12U:
@@ -417,28 +397,6 @@ static bool renault_v0_type_preamble_bits_valid(RenaultV0TypeId type_id, uint8_t
     }
 
     return preamble_bits == renault_v0_default_preamble_bits(type_id);
-}
-
-static const char* renault_v0_get_button_name(RenaultV0TypeId type_id, uint8_t button) {
-    if(type_id == RenaultV0Type13) {
-        switch(button) {
-        case 0x06:
-            return "Lock";
-        case 0x0A:
-            return "Unlock";
-        default:
-            return "??";
-        }
-    }
-
-    const uint8_t low_nibble = button & 0x0FU;
-    if((low_nibble >= 0x04U) && (low_nibble <= 0x07U)) {
-        return "Lock";
-    }
-    if((low_nibble >= 0x08U) && (low_nibble <= 0x0BU)) {
-        return "Unlock";
-    }
-    return "??";
 }
 
 static void renault_v0_parse_fields(uint64_t data, uint32_t* serial, uint8_t* button, uint8_t* counter) {
@@ -632,23 +590,22 @@ static bool renault_v0_classify_frame(uint64_t data, uint32_t key2, RenaultV0Dec
     attempt->c2_ok = c2_ok;
     attempt->ic_ok = ic_ok;
 
-    if(type && c1_ok && c2_ok && renault_v0_type_button_valid(type->id, button)) {
+    // [SPLIT V0/V1] Renault V0 now ONLY owns type 0x13 (the proprietary matrix
+    // crypto). ALL non-13 variants (0x04/0x0C/0x1A/0x3B/0x3F and the synthesized
+    // "Dynamic") were split out into "Renault V1" (Hitag2-based, Hell-recoverable).
+    // Reject non-13 here so V1 can claim them. V1 conversely rejects 0x13, making
+    // the two protocols mutually exclusive regardless of registry order.
+    if(type && c1_ok && c2_ok && (type->id == RenaultV0Type13) &&
+       renault_v0_type_button_valid(type->id, button)) {
         attempt->type_id = type->id;
         attempt->type_tag = type->value;
         return true;
     }
 
-    const bool dynamic_c1_ok =
-        renault_v0_button_valid_generic(button) && (serial != 0U) && (serial <= 0xFFFFFFU);
-    const bool dynamic_c2_ok = renault_v0_checksum_hi2xor_valid(checksum_high2_xor);
-    attempt->c1_ok = dynamic_c1_ok;
-    attempt->c2_ok = dynamic_c2_ok;
-
-    if(dynamic_c1_ok && dynamic_c2_ok) {
-        attempt->type_id = RenaultV0TypeDynamic;
-        attempt->type_tag = checksum_low6;
-        return true;
-    }
+    // Dynamic and all other non-13 known types belong to Renault V1 now. Silence
+    // the now-unused high-2-xor/checksum locals that only fed the Dynamic path.
+    (void)checksum_high2_xor;
+    (void)checksum_low6;
 
     return false;
 }
@@ -1105,6 +1062,30 @@ SubGhzProtocolStatus
             flipper_format_rewind(flipper_format);
             flipper_format_read_uint32(flipper_format, "Cnt", &cnt_u32, 1);
 
+            // [PROTOPIRATE_PORT] custom_btn support
+            // Renault V0 Type13 (rolling) supports two buttons:
+            //   0x06 = Lock, 0x0A = Unlock (see renault_v0_get_button_name).
+            // The re-encode (renault_v0_build_key) + checksum validation below make
+            // the remapped button a real, valid frame. OK reproduces the captured
+            // button exactly (byte-identical replay).
+            {
+                const uint8_t original_btn = captured_button;
+                if(subghz_custom_btn_get_original() == 0) {
+                    subghz_custom_btn_set_original(original_btn);
+                }
+                subghz_custom_btn_set_max(4);
+                uint8_t custom_btn_id = subghz_custom_btn_get();
+                switch(custom_btn_id) {
+                case SUBGHZ_CUSTOM_BTN_UP:    btn_u32 = 0x06U; break; // Lock
+                case SUBGHZ_CUSTOM_BTN_OK:    btn_u32 = original_btn; break;
+                case SUBGHZ_CUSTOM_BTN_DOWN:  btn_u32 = 0x0AU; break; // Unlock
+                // Type13 has no Trunk/Panic; fall back to captured button.
+                case SUBGHZ_CUSTOM_BTN_LEFT:  btn_u32 = original_btn; break;
+                case SUBGHZ_CUSTOM_BTN_RIGHT: btn_u32 = original_btn; break;
+                default:                      btn_u32 = original_btn; break;
+                }
+            }
+
             instance->tx_button = (uint8_t)btn_u32;
             if(!renault_v0_type_button_valid(captured_type, instance->tx_button)) {
                 break;
@@ -1314,6 +1295,28 @@ uint8_t subghz_protocol_decoder_renault_v0_get_hash_data(void* context) {
     return (uint8_t)(hash ^ key2_mix);
 }
 
+static const char* renault_v0_get_button_name(RenaultV0TypeId type_id, uint8_t button) {
+    if(type_id == RenaultV0Type13) {
+        switch(button) {
+        case 0x06:
+            return "Lock";
+        case 0x0A:
+            return "Unlock";
+        default:
+            return "??";
+        }
+    }
+
+    const uint8_t low_nibble = button & 0x0FU;
+    if((low_nibble >= 0x04U) && (low_nibble <= 0x07U)) {
+        return "Lock";
+    }
+    if((low_nibble >= 0x08U) && (low_nibble <= 0x0BU)) {
+        return "Unlock";
+    }
+    return "??";
+}
+
 void subghz_protocol_decoder_renault_v0_get_string(void* context, FuriString* output) {
     furi_assert(context);
 
@@ -1322,22 +1325,16 @@ void subghz_protocol_decoder_renault_v0_get_string(void* context, FuriString* ou
     furi_string_cat_printf(
         output,
         "%s %dbit\r\n"
-        "Key:%016llX\r\n"
-        "Key2:%05lX Sn:%06lX\r\n"
-        "Btn:%01X [%s] Cnt:%02lX\r\n"
-        "C1:[%s] C2:[%s]\r\n"
-        "IC:[%s]",
+        "Key:0x%016llX\r\n"
+        "SN:0x%lX Btn:[%s]\r\n"
+        "CRC:%s Cnt:%02lX",
         instance->generic.protocol_name,
         instance->packet_bit_count,
         instance->generic.data,
-        instance->key2,
         instance->generic.serial,
-        instance->generic.btn,
         renault_v0_get_button_name(instance->type_id, instance->generic.btn),
-        instance->generic.cnt,
-        instance->check_c1 ? "ERR" : "OK",
-        instance->check_c2 ? "ERR" : "OK",
-        instance->check_ic ? "MISS" : "MATCH");
+        (instance->check_c1 || instance->check_c2) ? "ERR" : "OK",
+        instance->generic.cnt);
 }
 
 bool renault_v0_flipper_is_rolling(FlipperFormat* flipper_format) {

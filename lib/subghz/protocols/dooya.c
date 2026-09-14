@@ -5,6 +5,8 @@
 #include "../blocks/generic.h"
 #include "../blocks/math.h"
 
+#include "../blocks/custom_btn_i.h"
+
 #define TAG "SubGhzProtocolDooya"
 
 #define DOYA_SINGLE_CHANNEL 0xFF
@@ -91,6 +93,29 @@ void subghz_protocol_encoder_dooya_free(void* context) {
     free(instance);
 }
 
+// Dooya stores the button in the low byte of data. These are the real button
+// codes emitted by the decoder's button-name table.
+// OK -> original captured button, D-pad -> other known Dooya buttons.
+static uint8_t subghz_protocol_dooya_get_btn_code(void) {
+    uint8_t custom_btn_id = subghz_custom_btn_get();
+    uint8_t original_btn_code = subghz_custom_btn_get_original();
+    uint8_t btn = original_btn_code;
+
+    if((custom_btn_id == SUBGHZ_CUSTOM_BTN_OK) && (original_btn_code != 0)) {
+        btn = original_btn_code;
+    } else if(custom_btn_id == SUBGHZ_CUSTOM_BTN_UP) {
+        btn = 0x11; // Up_Long
+    } else if(custom_btn_id == SUBGHZ_CUSTOM_BTN_DOWN) {
+        btn = 0x33; // Down_Long
+    } else if(custom_btn_id == SUBGHZ_CUSTOM_BTN_LEFT) {
+        btn = 0x55; // Stop
+    } else if(custom_btn_id == SUBGHZ_CUSTOM_BTN_RIGHT) {
+        btn = 0xCC; // P2
+    }
+
+    return btn;
+}
+
 /**
  * Generating an upload from data.
  * @param instance Pointer to a SubGhzProtocolEncoderDooya instance
@@ -162,6 +187,17 @@ SubGhzProtocolStatus
         // Optional value
         flipper_format_read_uint32(
             flipper_format, "Repeat", (uint32_t*)&instance->encoder.repeat, 1);
+
+        // Save original captured button and enable the D-pad (4 alternate buttons)
+        uint8_t original_btn = instance->generic.data & 0xFF;
+        if(subghz_custom_btn_get_original() == 0) {
+            subghz_custom_btn_set_original(original_btn);
+        }
+        subghz_custom_btn_set_max(4);
+
+        // Select the button according to the D-pad and rebuild the low byte of data
+        uint8_t btn = subghz_protocol_dooya_get_btn_code();
+        instance->generic.data = (instance->generic.data & ~(uint64_t)0xFF) | (uint64_t)btn;
 
         if(!subghz_protocol_encoder_dooya_get_upload(instance)) {
             ret = SubGhzProtocolStatusErrorEncoderGetUpload;
@@ -345,6 +381,12 @@ static void subghz_protocol_dooya_check_remote_controller(SubGhzBlockGeneric* in
         instance->cnt = DOYA_SINGLE_CHANNEL;
     }
     instance->btn = instance->data & 0xFF;
+
+    // Save original button for later use
+    if(subghz_custom_btn_get_original() == 0) {
+        subghz_custom_btn_set_original(instance->btn);
+    }
+    subghz_custom_btn_set_max(4);
 }
 
 uint8_t subghz_protocol_decoder_dooya_get_hash_data(void* context) {
@@ -428,17 +470,10 @@ void subghz_protocol_decoder_dooya_get_string(void* context, FuriString* output)
         output,
         "%s %dbit\r\n"
         "Key:0x%010llX\r\n"
-        "Sn:0x%08lX\r\n"
-        "Btn:%X - %s\r\n",
+        "SN:0x%lX Btn:[%s]\r\n",
         instance->generic.protocol_name,
         instance->generic.data_count_bit,
         instance->generic.data,
         instance->generic.serial,
-        instance->generic.btn,
         subghz_protocol_dooya_get_name_button(instance->generic.btn));
-    if(instance->generic.cnt == DOYA_SINGLE_CHANNEL) {
-        furi_string_cat_printf(output, "Ch:Single\r\n");
-    } else {
-        furi_string_cat_printf(output, "Ch:%lu\r\n", instance->generic.cnt);
-    }
 }

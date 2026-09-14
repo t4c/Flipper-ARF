@@ -6,6 +6,8 @@
 #include "../blocks/generic.h"
 #include "../blocks/math.h"
 
+#include "../blocks/custom_btn_i.h"
+
 #define TAG "SubGhzProtocolChambCode"
 
 #define CHAMBERLAIN_CODE_BIT_STOP 0b0001
@@ -226,6 +228,10 @@ SubGhzProtocolStatus
         // Optional value
         flipper_format_read_uint32(
             flipper_format, "Repeat", (uint32_t*)&instance->encoder.repeat, 1);
+
+        // Chamberlain Code carries DIP switches, not a separable button; enable
+        // the D-pad so it is visible, but every direction re-sends the original.
+        subghz_custom_btn_set_max(4);
 
         if(!subghz_protocol_encoder_chamb_code_get_upload(instance)) {
             ret = SubGhzProtocolStatusErrorEncoderGetUpload;
@@ -464,42 +470,11 @@ void subghz_protocol_decoder_chamb_code_get_string(void* context, FuriString* ou
 
     uint32_t code_found_lo = instance->generic.data & 0x00000000ffffffff;
 
-    uint64_t code_found_reverse = subghz_protocol_blocks_reverse_key(
-        instance->generic.data, instance->generic.data_count_bit);
-
-    uint32_t code_found_reverse_lo = code_found_reverse & 0x00000000ffffffff;
-
     furi_string_cat_printf(
         output,
-        "%s %db\r\n"
-        "Key:0x%03lX\r\n"
-        "Yek:0x%03lX\r\n",
+        "%s %dbit\r\n"
+        "Key:0x%03lX\r\n",
         instance->generic.protocol_name,
         instance->generic.data_count_bit,
-        code_found_lo,
-        code_found_reverse_lo);
-
-    switch(instance->generic.data_count_bit) {
-    case 7:
-        furi_string_cat_printf(
-            output,
-            "DIP:" CHAMBERLAIN_7_CODE_DIP_PATTERN "\r\n",
-            CHAMBERLAIN_7_CODE_DATA_TO_DIP(code_found_lo));
-        break;
-    case 8:
-        furi_string_cat_printf(
-            output,
-            "DIP:" CHAMBERLAIN_8_CODE_DIP_PATTERN "\r\n",
-            CHAMBERLAIN_8_CODE_DATA_TO_DIP(code_found_lo));
-        break;
-    case 9:
-        furi_string_cat_printf(
-            output,
-            "DIP:" CHAMBERLAIN_9_CODE_DIP_PATTERN "\r\n",
-            CHAMBERLAIN_9_CODE_DATA_TO_DIP(code_found_lo));
-        break;
-
-    default:
-        break;
-    }
+        code_found_lo);
 }

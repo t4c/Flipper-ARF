@@ -7,6 +7,8 @@
 #include "../blocks/generic.h"
 #include "../blocks/math.h"
 
+#include "../blocks/custom_btn_i.h"
+
 #define TAG "SubGhzProtocolMarantec"
 
 static const SubGhzBlockConst subghz_protocol_marantec_const = {
@@ -218,6 +220,15 @@ SubGhzProtocolStatus
             flipper_format, "Repeat", (uint32_t*)&instance->encoder.repeat, 1);
 
         subghz_protocol_marantec_remote_controller(&instance->generic);
+
+        // The Marantec frame carries an embedded CRC8 that would need to be
+        // recomputed for a different button. To keep decode/CRC untouched we
+        // only expose the D-pad; every direction re-sends the original button.
+        if(subghz_custom_btn_get_original() == 0) {
+            subghz_custom_btn_set_original(instance->generic.btn);
+        }
+        subghz_custom_btn_set_max(4);
+
         subghz_protocol_encoder_marantec_get_upload(instance);
         instance->encoder.front = 0;
         instance->encoder.is_running = true;
@@ -401,17 +412,16 @@ void subghz_protocol_decoder_marantec_get_string(void* context, FuriString* outp
 
     furi_string_cat_printf(
         output,
-        "%s %db\r\n"
-        "Key: 0x%lX%08lX\r\n"
-        "Sn: 0x%07lX \r\n"
-        "CRC: 0x%02X - %s\r\n"
-        "Btn: %X\r\n",
+        "%s %dbit\r\n"
+        "Key:0x%lX%08lX\r\n"
+        "SN:0x%07lX Btn:%X\r\n"
+        "CRC:0x%02X - %s\r\n",
         instance->generic.protocol_name,
         instance->generic.data_count_bit,
         (uint32_t)(instance->generic.data >> 32),
         (uint32_t)(instance->generic.data & 0xFFFFFFFF),
         instance->generic.serial,
+        instance->generic.btn,
         crc,
-        crc_ok ? "Valid" : "Invalid",
-        instance->generic.btn);
+        crc_ok ? "Valid" : "Invalid");
 }

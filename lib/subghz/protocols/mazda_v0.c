@@ -1,5 +1,7 @@
 #include "mazda_v0.h"
 
+// [PROTOPIRATE_PORT] custom_btn support
+#include <lib/subghz/blocks/custom_btn_i.h>
 #include <string.h>
 
 // =============================================================================
@@ -113,7 +115,8 @@ const SubGhzProtocolEncoder subghz_protocol_mazda_v0_encoder = {
 const SubGhzProtocol subghz_protocol_mazda_v0 = {
     .name = MAZDA_PROTOCOL_V0_NAME,
     .type = SubGhzProtocolTypeDynamic,
-    .flag = SubGhzProtocolFlag_433 | SubGhzProtocolFlag_FM | SubGhzProtocolFlag_Decodable |
+    .flag = SubGhzProtocolFlag_315 | SubGhzProtocolFlag_433 | SubGhzProtocolFlag_FM |
+            SubGhzProtocolFlag_Decodable |
             SubGhzProtocolFlag_Load | SubGhzProtocolFlag_Save | SubGhzProtocolFlag_Send,
     .decoder = &subghz_protocol_mazda_v0_decoder,
     .encoder = &subghz_protocol_mazda_v0_encoder,
@@ -442,6 +445,27 @@ SubGhzProtocolStatus
                flipper_format, "Repeat", (uint32_t*)&instance->encoder.repeat, 1)) {
             instance->encoder.repeat = 10;
         }
+
+        // [PROTOPIRATE_PORT] custom_btn support
+        // Mazda V0 mapping: Up=0x1 (LOCK), OK=0x2 (UNLOCK), Down=0x4 (BOOT),
+        // Right=0x8 (REMOTE). Left unsupported.
+        {
+            const uint8_t original_btn = (uint8_t)(instance->generic.btn & 0x0FU);
+            if(subghz_custom_btn_get_original() == 0) {
+                subghz_custom_btn_set_original(original_btn);
+            }
+            subghz_custom_btn_set_max(4);
+            uint8_t custom_btn_id = subghz_custom_btn_get();
+            switch(custom_btn_id) {
+            case SUBGHZ_CUSTOM_BTN_UP:    instance->generic.btn = 0x1U; break;
+            // [BUGFIX] OK = default post-load; replay captured button.
+            case SUBGHZ_CUSTOM_BTN_OK:    instance->generic.btn = original_btn; break;
+            case SUBGHZ_CUSTOM_BTN_DOWN:  instance->generic.btn = 0x4U; break;
+            case SUBGHZ_CUSTOM_BTN_RIGHT: instance->generic.btn = 0x8U; break;
+            default:                      instance->generic.btn = original_btn; break;
+            }
+        }
+
         instance->generic.btn &= 0x0FU;
         instance->generic.cnt &= 0xFFFFFU;
 
@@ -693,6 +717,14 @@ SubGhzProtocolStatus
 
         flipper_format_read_uint32(flipper_format, "Cnt", &instance->count, 1);
         instance->generic.cnt = instance->count;
+
+        // [PROTOPIRATE_PORT] custom_btn support
+        // Mazda V0 mapping: Up=0x1 (LOCK), OK=0x2 (UNLOCK), Down=0x4 (BOOT),
+        // Right=0x8 (REMOTE). Left unsupported → 4 buttons.
+        if(subghz_custom_btn_get_original() == 0) {
+            subghz_custom_btn_set_original(instance->generic.btn);
+        }
+        subghz_custom_btn_set_max(4);
     }
 
     return ret;
@@ -710,17 +742,16 @@ void subghz_protocol_decoder_mazda_v0_get_string(void* context, FuriString* outp
 
     furi_string_cat_printf(
         output,
-        "%s %dbit CRC:%s\r\n"
-        "Key: %016llX\r\n"
-        "Sn: %08lX  Btn: %02X - %s\r\n"
-        "Cnt: %05lX  Chk: %02X\r\n",
+        "%s %dbit\r\n"
+        "Key:0x%016llX\r\n"
+        "SN:0x%lX Btn:[%s]\r\n"
+        "CRC:%02X Cnt:%05lX [%s]\r\n",
         instance->generic.protocol_name,
         instance->generic.data_count_bit,
-        (raw_crc == calc_crc) ? "OK" : "BAD",
         (unsigned long long)instance->generic.data,
         (unsigned long)instance->generic.serial,
-        instance->generic.btn,
         mazda_v0_get_button_name(instance->generic.btn),
+        raw_crc,
         (unsigned long)(instance->generic.cnt & 0xFFFFFU),
-        raw_crc);
+        (raw_crc == calc_crc) ? "OK" : "BAD");
 }

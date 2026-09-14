@@ -6,6 +6,8 @@
 #include "../blocks/generic.h"
 #include "../blocks/math.h"
 
+#include "../blocks/custom_btn_i.h"
+
 /*
  * Help
  * https://phreakerclub.com/447
@@ -185,6 +187,10 @@ SubGhzProtocolStatus
         flipper_format_read_uint32(
             flipper_format, "Repeat", (uint32_t*)&instance->encoder.repeat, 1);
 
+        // CAME has no separable button field (fixed code); enable the D-pad so
+        // it is visible, but every direction re-sends the original captured code.
+        subghz_custom_btn_set_max(4);
+
         if(!subghz_protocol_encoder_came_get_upload(instance)) {
             ret = SubGhzProtocolStatusErrorEncoderGetUpload;
             break;
@@ -358,11 +364,6 @@ void subghz_protocol_decoder_came_get_string(void* context, FuriString* output) 
 
     uint32_t code_found_lo = instance->generic.data & 0x000003ffffffffff;
 
-    uint64_t code_found_reverse = subghz_protocol_blocks_reverse_key(
-        instance->generic.data, instance->generic.data_count_bit);
-
-    uint32_t code_found_reverse_lo = code_found_reverse & 0x000003ffffffffff;
-
     const char* name = instance->generic.protocol_name;
     switch(instance->generic.data_count_bit) {
     case PRASTEL_25_COUNT_BIT:
@@ -377,10 +378,8 @@ void subghz_protocol_decoder_came_get_string(void* context, FuriString* output) 
     furi_string_cat_printf(
         output,
         "%s %dbit\r\n"
-        "Key:0x%08lX\r\n"
-        "Yek:0x%08lX\r\n",
+        "Key:0x%08lX\r\n",
         name,
         instance->generic.data_count_bit,
-        code_found_lo,
-        code_found_reverse_lo);
+        code_found_lo);
 }

@@ -5,6 +5,8 @@
 #include "../blocks/generic.h"
 #include "../blocks/math.h"
 
+#include "../blocks/custom_btn_i.h"
+
 #define TAG "SubGhzProtocolTreadmill37"
 
 static const SubGhzBlockConst subghz_protocol_treadmill37_const = {
@@ -156,6 +158,13 @@ SubGhzProtocolStatus
             flipper_format, "Repeat", (uint32_t*)&instance->encoder.repeat, 1);
 
         subghz_protocol_treadmill37_check_remote_controller(&instance->generic);
+
+        // Treadmill37 (QH-433) has no discrete button field (the frame carries a
+        // serial and a rolling/counter value, btn is always 0). Enable the D-pad
+        // so the transmit view exposes it, but every direction re-sends the
+        // originally captured code unchanged.
+        subghz_custom_btn_set_max(4);
+
         subghz_protocol_encoder_treadmill37_get_upload(instance);
         instance->encoder.is_running = true;
     } while(false);
@@ -330,9 +339,6 @@ void subghz_protocol_decoder_treadmill37_get_string(void* context, FuriString* o
 
     subghz_protocol_treadmill37_check_remote_controller(&instance->generic);
 
-    uint64_t code_found_reverse = subghz_protocol_blocks_reverse_key(
-        instance->generic.data, instance->generic.data_count_bit);
-
     // for future use
     // // push protocol data to global variable
     // subghz_block_generic_global.btn_is_available = false;
@@ -342,15 +348,12 @@ void subghz_protocol_decoder_treadmill37_get_string(void* context, FuriString* o
 
     furi_string_cat_printf(
         output,
-        "%s %db\r\n"
-        "Key: 0x%08llX\r\n"
-        "Yek: 0x%08llX\r\n"
-        "Serial: 0x%06lX\r\n"
-        "Btn: %04lX",
+        "%s %dbit\r\n"
+        "Key:0x%08llX\r\n"
+        "SN:0x%lX Btn:%lX",
         instance->generic.protocol_name,
         instance->generic.data_count_bit,
         (uint64_t)(instance->generic.data & 0xFFFFFFFFFF),
-        (code_found_reverse & 0xFFFFFFFFFF),
         instance->generic.serial,
         instance->generic.cnt);
 }

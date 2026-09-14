@@ -4,6 +4,7 @@
 #include "../blocks/encoder.h"
 #include "../blocks/generic.h"
 #include "../blocks/math.h"
+#include "../blocks/custom_btn_i.h"
 #include <lib/toolbox/manchester_decoder.h>
 #include <string.h>
 
@@ -442,7 +443,8 @@ const SubGhzProtocolEncoder subghz_protocol_kia_v6_encoder = {
 const SubGhzProtocol subghz_protocol_kia_v6 = {
     .name = SUBGHZ_PROTOCOL_KIA_V6_NAME,
     .type = SubGhzProtocolTypeDynamic,
-    .flag = SubGhzProtocolFlag_433 | SubGhzProtocolFlag_FM | SubGhzProtocolFlag_Decodable |
+    .flag = SubGhzProtocolFlag_315 | SubGhzProtocolFlag_433 | SubGhzProtocolFlag_FM |
+            SubGhzProtocolFlag_Decodable |
             SubGhzProtocolFlag_Save | SubGhzProtocolFlag_Load | SubGhzProtocolFlag_Send,
     .decoder = &subghz_protocol_kia_v6_decoder,
     .encoder = &subghz_protocol_kia_v6_encoder,
@@ -735,17 +737,6 @@ void subghz_protocol_decoder_kia_v6_get_string(void* context, FuriString* output
 
     uint32_t key1_hi = instance->stored_part1_high;
     uint32_t key1_lo = instance->stored_part1_low;
-    uint32_t key2_hi = instance->stored_part2_high;
-    uint32_t key2_lo = instance->stored_part2_low;
-
-    uint32_t key2_uVar4 = key2_hi << 16;
-    uint32_t key2_uVar2 = key2_lo >> 16;
-    uint32_t key2_uVar1 = key2_hi >> 16;
-    uint32_t key2_combined = key2_uVar4 | key2_uVar2;
-
-    uint32_t key2_uVar3 = key2_lo << 16;
-    uint32_t key2_second = (instance->data_part3 & 0xFFFF) | key2_uVar3;
-
     uint32_t serial_6 = instance->generic.serial & 0xFFFFFF;
 
     const char* btn_name;
@@ -770,24 +761,18 @@ void subghz_protocol_decoder_kia_v6_get_string(void* context, FuriString* output
     furi_string_printf(
         output,
         "%s %dbit\r\n"
-        "%08lX%08lX%04lX\r\n"
-        "%08lX%08lX Fx:%02X\r\n"
-        "Ser:%06lX Btn:%01X[%s]\r\n"
-        "Cnt:%08lX CRC:%02X-%02X\r\n",
+        "Key:0x%08lX%08lX\r\n"
+        "SN:0x%06lX Btn:[%s]\r\n"
+        "CRC:%02X-%02X Cnt:%08lX\r\n",
         instance->generic.protocol_name,
         instance->generic.data_count_bit,
         key1_hi,
         key1_lo,
-        key2_uVar1,
-        key2_combined,
-        key2_second,
-        instance->fx_field,
         serial_6,
-        instance->generic.btn & 0x0F,
         btn_name,
-        instance->generic.cnt,
         instance->crc1_field,
-        instance->crc2_field);
+        instance->crc2_field,
+        instance->generic.cnt);
 }
 
 static inline void kia_v6_encode_manchester_bit(
@@ -955,6 +940,28 @@ SubGhzProtocolStatus
         instance->generic.data_count_bit = subghz_protocol_kia_v6_const.min_count_bit_for_found;
         instance->fx_field = dec.fx_field;
 
+        // [PROTOPIRATE_PORT] custom_btn support
+        // Kia V6 codes (see get_string switch): Lock=0x01, Unlock=0x02,
+        // Trunk=0x03, Panic=0x04. build_upload re-encrypts using
+        // instance->generic.btn, so remap it here before that call.
+        {
+            const uint8_t original_btn = (uint8_t)(instance->generic.btn & 0x0FU);
+            if(subghz_custom_btn_get_original() == 0) {
+                subghz_custom_btn_set_original(original_btn);
+            }
+            subghz_custom_btn_set_max(4);
+            uint8_t custom_btn_id = subghz_custom_btn_get();
+            switch(custom_btn_id) {
+            case SUBGHZ_CUSTOM_BTN_UP:    instance->generic.btn = 0x01U;         break; // Lock
+            case SUBGHZ_CUSTOM_BTN_OK:    instance->generic.btn = original_btn;  break;
+            case SUBGHZ_CUSTOM_BTN_DOWN:  instance->generic.btn = 0x02U;         break; // Unlock
+            case SUBGHZ_CUSTOM_BTN_LEFT:  instance->generic.btn = 0x03U;         break; // Trunk
+            case SUBGHZ_CUSTOM_BTN_RIGHT: instance->generic.btn = 0x04U;         break; // Panic
+            default:                      instance->generic.btn = original_btn;  break;
+            }
+            instance->generic.btn &= 0x0FU;
+        }
+
         kia_v6_encoder_build_upload(instance);
 
         instance->encoder.is_running = true;
@@ -982,7 +989,9 @@ LevelDuration subghz_protocol_encoder_kia_v6_yield(void* context) {
     LevelDuration ret = instance->encoder.upload[instance->encoder.front];
     instance->encoder.front++;
     if(instance->encoder.front >= instance->encoder.size_upload) {
-        instance->encoder.repeat--;
+        // Endless/breakless TX: while OK is held (endless_tx set by the transmit
+        // scene) do not consume repeats, so the signal loops until release.
+        if(!subghz_block_generic_global.endless_tx) instance->encoder.repeat--;
         instance->encoder.front = 0;
     }
     return ret;

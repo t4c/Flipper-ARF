@@ -1,4 +1,6 @@
 #include "ford_v1.h"
+// [PROTOPIRATE_PORT] custom_btn support
+#include <lib/subghz/blocks/custom_btn_i.h>
 #include <string.h>
 
 #define TAG "FordProtocolV1"
@@ -47,7 +49,6 @@ typedef enum {
     FordV1DecoderStepData = 3,
 } FordV1DecoderStep;
 
-static const char* ford_v1_get_button_name(uint8_t btn);
 static void ford_v1_decode_with_flag(uint8_t* raw, size_t len, uint8_t flag_byte);
 static void ford_v1_decode(uint8_t* raw, size_t len);
 static void ford_v1_encode_inverse_block(uint8_t block[9]);
@@ -98,23 +99,6 @@ const SubGhzProtocol ford_protocol_v1 = {
 };
 
 #define ford_v1_crc16(data, len) subghz_protocol_blocks_crc16((data), (len), 0x1021, 0x0000)
-
-static const char* ford_v1_get_button_name(uint8_t btn) {
-    switch(btn) {
-    case 0:
-        return "Sync";
-    case 1:
-        return "Lock";
-    case 2:
-        return "Unlock";
-    case 4:
-        return "Trunk";
-    case 8:
-        return "Panic";
-    default:
-        return "??";
-    }
-}
 
 static void ford_v1_decode_with_flag(uint8_t* raw, size_t len, uint8_t flag_byte) {
     if(len < 9) return;
@@ -829,6 +813,14 @@ SubGhzProtocolStatus
             instance->generic.serial = serial;
             instance->generic.btn = (uint8_t)btn;
             instance->generic.cnt = cnt;
+
+            // [PROTOPIRATE_PORT] custom_btn support
+            // Ford V1 mapping (4-bit btn): Up=0x2 (Unlock), OK=0x4 (Trunk),
+            // Down=0x8 (Panic), Left=0x1 (Lock). Right not supported (4-bit only).
+            if(subghz_custom_btn_get_original() == 0) {
+                subghz_custom_btn_set_original(instance->generic.btn);
+            }
+            subghz_custom_btn_set_max(4);
         }
     }
 
@@ -838,6 +830,23 @@ SubGhzProtocolStatus
 void subghz_protocol_decoder_ford_v1_free(void* context) {
     furi_check(context);
     free(context);
+}
+
+static const char* ford_v1_get_button_name(uint8_t btn) {
+    switch(btn) {
+    case 0:
+        return "Sync";
+    case 1:
+        return "Lock";
+    case 2:
+        return "Unlock";
+    case 4:
+        return "Trunk";
+    case 8:
+        return "Panic";
+    default:
+        return "??";
+    }
 }
 
 void subghz_protocol_decoder_ford_v1_get_string(void* context, FuriString* output) {
@@ -850,8 +859,6 @@ void subghz_protocol_decoder_ford_v1_get_string(void* context, FuriString* outpu
     uint16_t crc16 = crc & 0xFFFF;
 
     if(instance->encryption_supported) {
-        const char* btn_name = ford_v1_get_button_name(instance->generic.btn);
-
         uint16_t calc_crc = crc16;
 
         bool crc_ok;
@@ -866,21 +873,17 @@ void subghz_protocol_decoder_ford_v1_get_string(void* context, FuriString* outpu
         furi_string_cat_printf(
             output,
             "%s %dbit\r\n"
-            "%014llX%06llX\r\n"
-            "%010llX%04lX\r\n"
-            "Sn:%08lX Bt:%01X [%s]\r\n"
-            "Cnt:%05lX CRC:%04lX [%s]\r\n",
+            "Key:0x%014llX\r\n"
+            "SN:0x%lX Btn:[%s]\r\n"
+            "CRC:%04lX Cnt:%05lX\r\n"
+            "[%s]\r\n",
             instance->generic.protocol_name,
             instance->generic.data_count_bit,
             (unsigned long long)key1,
-            (unsigned long long)(key2 >> 40),
-            (unsigned long long)(key2 & 0xFFFFFFFFFFULL),
-            (unsigned long)crc16,
             (unsigned long)instance->generic.serial,
-            instance->generic.btn,
-            btn_name,
-            (unsigned long)instance->generic.cnt,
+            ford_v1_get_button_name(instance->generic.btn),
             (unsigned long)crc16,
+            (unsigned long)instance->generic.cnt,
             crc_ok ? "OK" : "ERR");
     } else {
         uint8_t raw[FORD_V1_DATA_BYTES];
@@ -897,17 +900,12 @@ void subghz_protocol_decoder_ford_v1_get_string(void* context, FuriString* outpu
         furi_string_cat_printf(
             output,
             "%s %dbit\r\n"
-            "%014llX%06llX\r\n"
-            "%010llX%04lX\r\n"
-            "Sn:%08lX\r\n"
-            "CRC:%04lX [%s]\r\n"
-            "Encryption not supported !\r\n",
+            "Key:0x%014llX\r\n"
+            "SN:0x%lX\r\n"
+            "CRC:%04lX [%s]\r\n",
             instance->generic.protocol_name,
             instance->generic.data_count_bit,
             (unsigned long long)key1,
-            (unsigned long long)(key2 >> 40),
-            (unsigned long long)(key2 & 0xFFFFFFFFFFULL),
-            (unsigned long)crc16,
             (unsigned long)device_id,
             (unsigned long)crc16,
             crc_ok ? "OK" : "ERR");
@@ -1103,7 +1101,9 @@ LevelDuration subghz_protocol_encoder_ford_v1_yield(void* context) {
     }
     LevelDuration ret = instance->encoder.upload[instance->encoder.front];
     if(++instance->encoder.front == instance->encoder.size_upload) {
-        instance->encoder.repeat--;
+        // Endless/breakless TX: while OK is held (endless_tx set by the transmit
+        // scene) do not consume repeats, so the signal loops until release.
+        if(!subghz_block_generic_global.endless_tx) instance->encoder.repeat--;
         instance->encoder.front = 0;
     }
     return ret;
@@ -1201,6 +1201,27 @@ SubGhzProtocolStatus
             if(!flipper_format_read_uint32(flipper_format, "Cnt", &cnt, 1))
                 cnt = UINT32_MAX;
             if(serial == UINT32_MAX || btn == UINT32_MAX || cnt == UINT32_MAX) break;
+
+            // [PROTOPIRATE_PORT] custom_btn support
+            // Ford V1 mapping (4-bit): Up=0x2 (Unlock), OK=0x4 (Trunk),
+            // Down=0x8 (Panic), Left=0x1 (Lock). Right unsupported.
+            {
+                const uint8_t original_btn = (uint8_t)(btn & 0x0FU);
+                if(subghz_custom_btn_get_original() == 0) {
+                    subghz_custom_btn_set_original(original_btn);
+                }
+                subghz_custom_btn_set_max(4);
+                uint8_t custom_btn_id = subghz_custom_btn_get();
+                switch(custom_btn_id) {
+                case SUBGHZ_CUSTOM_BTN_UP:    btn = 0x02U; break;
+                // [BUGFIX] OK = default post-load; replay captured button.
+                case SUBGHZ_CUSTOM_BTN_OK:    btn = original_btn; break;
+                case SUBGHZ_CUSTOM_BTN_DOWN:  btn = 0x08U; break;
+                case SUBGHZ_CUSTOM_BTN_LEFT:  btn = 0x01U; break;
+                default:                      btn = original_btn; break;
+                }
+            }
+
             instance->generic.serial = serial;
             instance->generic.btn = (uint8_t)(btn & 0x0FU);
             instance->generic.cnt = cnt & 0xFFFFFU;

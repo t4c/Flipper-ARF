@@ -272,6 +272,43 @@ SubGhzProtocolStatus
             instance->te_detected = te;
         }
 
+        // [PROTOPIRATE_PORT] custom_btn support
+        // Fiat Marelli button codes live in the high nibble of frame byte 6,
+        // which is bits [15:12] of the 64-bit generic.data key.
+        //   Up    = 0x7 (Lock)
+        //   Down  = 0xB (Unlock)
+        //   Left  = 0xD (Trunk)
+        //   OK    = original captured button (byte-identical replay)
+        //   Right unsupported -> fall through to original.
+        // NOTE: bytes 8-12 are an encrypted payload keyed to the captured
+        // (button, counter); this port only rewrites the button nibble and the
+        // CRC8 (done in rebuild). When OK is selected the frame is unchanged.
+        {
+            const uint8_t original_btn = (uint8_t)((instance->generic.data >> 12U) & 0x0FU);
+            if(subghz_custom_btn_get_original() == 0) {
+                subghz_custom_btn_set_original(original_btn);
+            }
+            subghz_custom_btn_set_max(4);
+            uint8_t custom_btn_id = subghz_custom_btn_get();
+            uint8_t remapped = original_btn;
+            switch(custom_btn_id) {
+            case SUBGHZ_CUSTOM_BTN_UP:    remapped = 0x7U;          break; // Lock
+            case SUBGHZ_CUSTOM_BTN_OK:    remapped = original_btn;  break;
+            case SUBGHZ_CUSTOM_BTN_DOWN:  remapped = 0xBU;          break; // Unlock
+            case SUBGHZ_CUSTOM_BTN_LEFT:  remapped = 0xDU;          break; // Trunk
+            default:                      remapped = original_btn;  break;
+            }
+            if(remapped != original_btn) {
+                // Rewrite the button nibble (bits [15:12]) in generic.data so the
+                // rebuild-from-fields step below re-encodes the frame with the
+                // new button and recomputes the CRC8.
+                instance->generic.data =
+                    (instance->generic.data & ~((uint64_t)0x0FU << 12U)) |
+                    ((uint64_t)(remapped & 0x0FU) << 12U);
+                instance->generic.btn = remapped;
+            }
+        }
+
         fiat_marelli_encoder_rebuild_raw_data(instance);
 
         if(!fiat_marelli_encoder_get_upload(instance)) {
@@ -642,42 +679,27 @@ void subghz_protocol_decoder_fiat_marelli_get_string(void* context, FuriString* 
     furi_check(context);
     SubGhzProtocolDecoderFiatMarelli* instance = context;
 
-    uint8_t epoch = instance->raw_data[6] & 0xF;
     uint8_t counter = (instance->raw_data[7] >> 3) & 0x1F;
-    const char* variant = (instance->te_detected &&
-                           instance->te_detected < FIAT_MARELLI_TE_TYPE_AB_BOUNDARY)
-                              ? "B"
-                              : "A";
-    uint8_t scramble = (instance->raw_data[7] >> 1) & 0x3;
-    uint8_t fixed    =  instance->raw_data[7] & 0x1;
 
     const char* crc_str = "";
     if(instance->bit_count >= 104) {
         uint8_t calc = fiat_marelli_crc8(instance->raw_data, 12);
-        crc_str = (calc == instance->raw_data[12]) ? " CRC:OK" : " CRC:FAIL";
+        crc_str = (calc == instance->raw_data[12]) ? "OK" : "FAIL";
     }
 
     furi_string_cat_printf(
         output,
-        "%s %dbit%s\r\n"
-        "Enc:%02X%02X%02X%02X%02X Scr:%02X\r\n"
-        "Raw:%02X%02X Fixed:%X\r\n"
-        "Sn:%08X Cnt:%02X\r\n"
-        "Btn:%02X:[%s] Ep:%02X\r\n"
-        "Tp:%s\r\n",
+        "%s %dbit\r\n"
+        "Key:%02X%02X%02X%02X%02X\r\n"
+        "SN:0x%X Btn:[%s]\r\n"
+        "CRC:%s Cnt:%02X\r\n",
         instance->generic.protocol_name,
         (int)instance->bit_count,
-        crc_str,
         instance->raw_data[8], instance->raw_data[9],
         instance->raw_data[10], instance->raw_data[11],
         instance->raw_data[12],
-        (unsigned)scramble,
-        instance->raw_data[6], instance->raw_data[7],
-        (unsigned)fixed,
         (unsigned int)instance->generic.serial,
-        (unsigned)counter,
-        (unsigned)instance->generic.btn,
         fiat_marelli_button_name(instance->generic.btn),
-        (unsigned)epoch,
-        variant);
+        crc_str,
+        (unsigned)counter);
 }

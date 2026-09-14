@@ -44,14 +44,6 @@ typedef enum {
     SheriffCfmModelCount = 2,
 } SheriffCfmModel;
 
-static const char* cfm_model_name(SheriffCfmModel model) {
-    switch(model) {
-    case SheriffCfmModelZX750: return "ZX-750";
-    case SheriffCfmModelZX930: return "ZX-930";
-    default: return "?";
-    }
-}
-
 static void cfm_decrypt_transform(uint8_t* hop, SheriffCfmModel model) {
     uint8_t temp;
     switch(model) {
@@ -184,7 +176,7 @@ const SubGhzProtocolEncoder subghz_protocol_sheriff_cfm_encoder = {
 const SubGhzProtocol subghz_protocol_sheriff_cfm = {
     .name = SUBGHZ_PROTOCOL_SHERIFF_CFM_NAME,
     .type = SubGhzProtocolTypeDynamic,
-    .flag = SubGhzProtocolFlag_433 | SubGhzProtocolFlag_AM |
+    .flag = SubGhzProtocolFlag_315 | SubGhzProtocolFlag_433 | SubGhzProtocolFlag_AM |
             SubGhzProtocolFlag_Decodable |
             SubGhzProtocolFlag_Load | SubGhzProtocolFlag_Save | SubGhzProtocolFlag_Send,
     .decoder = &subghz_protocol_sheriff_cfm_decoder,
@@ -646,14 +638,13 @@ void subghz_protocol_decoder_sheriff_cfm_get_string(void* context, FuriString* o
         output,
         "%s %dbit\r\n"
         "Key:0x%lX%08lX\r\n"
-        "Sn:%08lX Btn:[%s]\r\n"
-        "Cnt:%04lX Model:%s\r\n",
+        "SN:0x%lX Btn:[%s]\r\n"
+        "Cnt:%04lX",
         instance->generic.protocol_name,
         instance->generic.data_count_bit,
         (uint32_t)(instance->generic.data >> 32),
         (uint32_t)instance->generic.data,
         instance->generic.serial,
         cfm_btn_name(selected_btn),
-        (uint32_t)instance->generic.cnt,
-        cfm_model_name(instance->model));
+        (uint32_t)instance->generic.cnt);
 }

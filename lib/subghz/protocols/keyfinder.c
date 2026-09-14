@@ -5,6 +5,8 @@
 #include "../blocks/generic.h"
 #include "../blocks/math.h"
 
+#include "../blocks/custom_btn_i.h"
+
 #define TAG "SubGhzProtocolKeyFinder"
 
 static const SubGhzBlockConst subghz_protocol_keyfinder_const = {
@@ -89,6 +91,30 @@ void subghz_protocol_encoder_keyfinder_free(void* context) {
     free(instance);
 }
 
+// Get custom button code
+// KeyFinder known buttons (from decoder samples):
+//   RED = 0xE, PURPLE = 0xB, GREEN = 0xD, BLUE = 0xC
+static uint8_t subghz_protocol_keyfinder_get_btn_code(void) {
+    uint8_t custom_btn_id = subghz_custom_btn_get();
+    uint8_t original_btn_code = subghz_custom_btn_get_original();
+    uint8_t btn = original_btn_code;
+
+    if((custom_btn_id == SUBGHZ_CUSTOM_BTN_OK) && (original_btn_code != 0)) {
+        // Restore original button code
+        btn = original_btn_code;
+    } else if(custom_btn_id == SUBGHZ_CUSTOM_BTN_UP) {
+        btn = 0xE; // RED
+    } else if(custom_btn_id == SUBGHZ_CUSTOM_BTN_DOWN) {
+        btn = 0xB; // PURPLE
+    } else if(custom_btn_id == SUBGHZ_CUSTOM_BTN_LEFT) {
+        btn = 0xD; // GREEN
+    } else if(custom_btn_id == SUBGHZ_CUSTOM_BTN_RIGHT) {
+        btn = 0xC; // BLUE
+    }
+
+    return btn;
+}
+
 /**
  * Generating an upload from data.
  * @param instance Pointer to a SubGhzProtocolEncoderKeyFinder instance
@@ -138,6 +164,12 @@ static void
 static void subghz_protocol_keyfinder_check_remote_controller(SubGhzBlockGeneric* instance) {
     instance->serial = instance->data >> 4;
     instance->btn = instance->data & 0xF;
+
+    // Save original button for later use
+    if(subghz_custom_btn_get_original() == 0) {
+        subghz_custom_btn_set_original(instance->btn);
+    }
+    subghz_custom_btn_set_max(4);
 }
 
 SubGhzProtocolStatus
@@ -157,7 +189,14 @@ SubGhzProtocolStatus
         flipper_format_read_uint32(
             flipper_format, "Repeat", (uint32_t*)&instance->encoder.repeat, 1);
 
+        // Parse serial/btn and enable D-pad custom buttons
         subghz_protocol_keyfinder_check_remote_controller(&instance->generic);
+
+        // Re-encode key using custom or default button
+        instance->generic.btn = subghz_protocol_keyfinder_get_btn_code();
+        instance->generic.data =
+            ((uint64_t)instance->generic.serial << 4) | (instance->generic.btn & 0xF);
+
         subghz_protocol_encoder_keyfinder_get_upload(instance);
         instance->encoder.is_running = true;
     } while(false);
@@ -337,9 +376,6 @@ void subghz_protocol_decoder_keyfinder_get_string(void* context, FuriString* out
 
     subghz_protocol_keyfinder_check_remote_controller(&instance->generic);
 
-    uint64_t code_found_reverse = subghz_protocol_blocks_reverse_key(
-        instance->generic.data, instance->generic.data_count_bit);
-
     // for future use
     // // push protocol data to global variable
     // subghz_block_generic_global.btn_is_available = false;
@@ -349,15 +385,12 @@ void subghz_protocol_decoder_keyfinder_get_string(void* context, FuriString* out
 
     furi_string_cat_printf(
         output,
-        "%s %db\r\n"
-        "Key: 0x%06lX\r\n"
-        "Yek: 0x%06lX\r\n"
-        "Serial: 0x%05lX\r\n"
-        "ID: 0x%0X",
+        "%s %dbit\r\n"
+        "Key:0x%06lX\r\n"
+        "SN:0x%05lX Btn:%X",
         instance->generic.protocol_name,
         instance->generic.data_count_bit,
         (uint32_t)(instance->generic.data & 0xFFFFFF),
-        (uint32_t)(code_found_reverse & 0xFFFFFF),
         instance->generic.serial,
         instance->generic.btn);
 }

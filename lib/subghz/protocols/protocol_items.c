@@ -85,7 +85,8 @@ const SubGhzProtocol* const subghz_protocol_registry_items[] = {
     &fiat_v1_protocol,
     &fiat_v2_protocol,
     &renault_v0_protocol,
- // &subghz_protocol_bmw_cas4,
+    &renault_v1_protocol,
+    &subghz_protocol_bmw_cas4,
     &subghz_protocol_subaru, 
     &subghz_protocol_mazda_siemens,
     &subghz_protocol_kia_v0,       
@@ -112,6 +113,11 @@ const SubGhzProtocol* const subghz_protocol_registry_items[] = {
     &honda_v1_protocol,
     &honda_v2_protocol,
 
+    // [UNLEASHED_PORT] New protocols from Unleashed firmware (disabled by default)
+    //&subghz_protocol_allstar_firefly,
+    //&subghz_protocol_ditec_gol4,
+    //&subghz_protocol_nord_ice,
+    //&subghz_protocol_telcoma_edge,
 
 };
 
@@ -172,6 +178,8 @@ static const SubGhzProtocolCatalogEntry subghz_protocol_catalog[] = {
      SUBGHZ_PROTOCOL_CATALOG_TX_KEY("psa")},
     {"Renault V0", SubGhzProtocolCatalogRoutePolicyAMDefault,
      SUBGHZ_PROTOCOL_CATALOG_TX_KEY("renault_v0")},
+    {"Renault V1", SubGhzProtocolCatalogRoutePolicyAMDefault,
+     SUBGHZ_PROTOCOL_CATALOG_TX_KEY("renault_v1")},
     {"Scher-Khan", SubGhzProtocolCatalogRoutePolicyFMDefault, NULL},
     {"Star Line", SubGhzProtocolCatalogRoutePolicyAMDefault,
      SUBGHZ_PROTOCOL_CATALOG_TX_KEY("star_line")},

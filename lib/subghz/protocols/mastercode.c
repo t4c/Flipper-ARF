@@ -6,6 +6,8 @@
 #include "../blocks/generic.h"
 #include "../blocks/math.h"
 
+#include "../blocks/custom_btn_i.h"
+
 // protocol MASTERCODE Clemsa MV1/MV12
 #define TAG "SubGhzProtocolMastercode"
 
@@ -171,6 +173,11 @@ SubGhzProtocolStatus
         // Optional value
         flipper_format_read_uint32(
             flipper_format, "Repeat", (uint32_t*)&instance->encoder.repeat, 1);
+
+        // Mastercode uses DIP switches (btn is a fixed DIP code, not a pressable
+        // button). Enable the D-pad so the transmit view exposes it, but every
+        // direction re-sends the originally captured code unchanged.
+        subghz_custom_btn_set_max(4);
 
         if(!subghz_protocol_encoder_mastercode_get_upload(instance)) {
             ret = SubGhzProtocolStatusErrorEncoderGetUpload;
@@ -353,15 +360,11 @@ void subghz_protocol_decoder_mastercode_get_string(void* context, FuriString* ou
     furi_string_cat_printf(
         output,
         "%s %dbit\r\n"
-        "Key:%llX   Btn:%X\r\n"
-        "  +:   " DIP_PATTERN "\r\n"
-        "  o:   " DIP_PATTERN "\r\n"
-        "  -:   " DIP_PATTERN "\r\n",
+        "Key:0x%llX\r\n"
+        "SN:0x%lX Btn:%X\r\n",
         instance->generic.protocol_name,
         instance->generic.data_count_bit,
         (uint64_t)(instance->generic.data),
-        instance->generic.btn,
-        SHOW_DIP_P(instance->generic.serial, DIP_P),
-        SHOW_DIP_P(instance->generic.serial, DIP_O),
-        SHOW_DIP_P(instance->generic.serial, DIP_N));
+        instance->generic.serial,
+        instance->generic.btn);
 }

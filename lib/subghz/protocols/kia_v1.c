@@ -118,25 +118,6 @@ static void subghz_protocol_kia_v1_check_remote_controller(SubGhzProtocolDecoder
     instance->crc_check = (crc == (instance->generic.data & 0xF));
 }
 
-static const char* subghz_protocol_kia_v1_get_name_button(uint8_t btn) {
-    const char* name;
-    switch(btn) {
-    case 0x1:
-        name = "Close";
-        break;
-    case 0x2:
-        name = "Open";
-        break;
-    case 0x3:
-        name = "Boot";
-        break;
-    default:
-        name = "??";
-        break;
-    }
-    return name;
-}
-
 void* subghz_protocol_encoder_kia_v1_alloc(SubGhzEnvironment* environment) {
     UNUSED(environment);
     SubGhzProtocolEncoderKiaV1* instance = calloc(1, sizeof(SubGhzProtocolEncoderKiaV1));
@@ -178,7 +159,9 @@ LevelDuration subghz_protocol_encoder_kia_v1_yield(void* context) {
     LevelDuration ret = instance->encoder.upload[instance->encoder.front];
 
     if(++instance->encoder.front == instance->encoder.size_upload) {
-        instance->encoder.repeat--;
+        // Endless/breakless TX: while OK is held (endless_tx set by the transmit
+        // scene) do not consume repeats, so the signal loops until release.
+        if(!subghz_block_generic_global.endless_tx) instance->encoder.repeat--;
         instance->encoder.front = 0;
     }
 
@@ -264,6 +247,25 @@ SubGhzProtocolStatus
         instance->generic.btn = (instance->generic.data >> 16) & 0xFF;
         instance->generic.cnt = ((instance->generic.data >> 4) & 0xF) << 8 |
                                 ((instance->generic.data >> 8) & 0xFF);
+
+        // [PROTOPIRATE_PORT] custom_btn support
+        // Kia V1 codes (see get_name_button): Close/Lock=0x1, Open/Unlock=0x2,
+        // Boot/Trunk=0x3. Only 3 buttons; RIGHT falls back to the captured one.
+        {
+            const uint8_t original_btn = (uint8_t)(instance->generic.btn & 0x0FU);
+            if(subghz_custom_btn_get_original() == 0) {
+                subghz_custom_btn_set_original(original_btn);
+            }
+            subghz_custom_btn_set_max(4);
+            uint8_t custom_btn_id = subghz_custom_btn_get();
+            switch(custom_btn_id) {
+            case SUBGHZ_CUSTOM_BTN_UP:    instance->generic.btn = 0x1U;          break; // Lock
+            case SUBGHZ_CUSTOM_BTN_OK:    instance->generic.btn = original_btn;  break;
+            case SUBGHZ_CUSTOM_BTN_DOWN:  instance->generic.btn = 0x2U;          break; // Unlock
+            case SUBGHZ_CUSTOM_BTN_LEFT:  instance->generic.btn = 0x3U;          break; // Trunk
+            default:                      instance->generic.btn = original_btn;  break;
+            }
+        }
 
         instance->encoder.repeat = 10;
 
@@ -470,6 +472,25 @@ SubGhzProtocolStatus
         &instance->generic, flipper_format, subghz_protocol_kia_v1_const.min_count_bit_for_found);
 }
 
+static const char* subghz_protocol_kia_v1_get_name_button(uint8_t btn) {
+    const char* name;
+    switch(btn) {
+    case 0x1:
+        name = "Close";
+        break;
+    case 0x2:
+        name = "Open";
+        break;
+    case 0x3:
+        name = "Boot";
+        break;
+    default:
+        name = "??";
+        break;
+    }
+    return name;
+}
+
 void subghz_protocol_decoder_kia_v1_get_string(void* context, FuriString* output) {
     furi_assert(context);
     SubGhzProtocolDecoderKiaV1* instance = context;
@@ -481,18 +502,16 @@ void subghz_protocol_decoder_kia_v1_get_string(void* context, FuriString* output
     furi_string_cat_printf(
         output,
         "%s %dbit\r\n"
-        "Key:%06lX%08lX\r\n"
-        "Serial:%08lX\r\n"
-        "Cnt:%03lX CRC:%01X %s\r\n"
-        "Btn:%02X:%s\r\n",
+        "Key:0x%06lX%08lX\r\n"
+        "SN:0x%lX Btn:[%s]\r\n"
+        "CRC:%01X %s Cnt:%03lX\r\n",
         instance->generic.protocol_name,
         instance->generic.data_count_bit,
         code_found_hi,
         code_found_lo,
         instance->generic.serial,
-        instance->generic.cnt,
+        subghz_protocol_kia_v1_get_name_button(instance->generic.btn),
         instance->crc,
         instance->crc_check ? "OK" : "WRONG",
-        instance->generic.btn,
-        subghz_protocol_kia_v1_get_name_button(instance->generic.btn));
+        instance->generic.cnt);
 }

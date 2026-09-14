@@ -1,4 +1,6 @@
 #include "ford_v2.h"
+// [PROTOPIRATE_PORT] custom_btn support
+#include <lib/subghz/blocks/custom_btn_i.h>
 #include <furi.h>
 #include <string.h>
 
@@ -154,6 +156,14 @@ static void ford_v2_decoder_extract_from_raw(SubGhzProtocolDecoderFordV2* instan
                                ((uint32_t)k[4] << 8) | (uint32_t)k[5];
 
     instance->generic.btn = k[6];
+
+    // [PROTOPIRATE_PORT] custom_btn support
+    // Ford V2 mapping: Up=0x11 (Unlock), OK=0x10 (Lock), Down=0x13 (Trunk),
+    // Left=0x14 (Panic), Right=0x15 (RemoteStart).
+    if(subghz_custom_btn_get_original() == 0) {
+        subghz_custom_btn_set_original(instance->generic.btn);
+    }
+    subghz_custom_btn_set_max(5);
 
     instance->counter16 = (uint16_t)((((uint16_t)(k[7] & 0x7FU)) << 9) | (((uint16_t)k[8]) << 1) |
                                      ((uint16_t)(k[9] >> 7)));
@@ -460,6 +470,35 @@ static SubGhzProtocolStatus
     ford_v2_encoder_deserialize_validate_and_pack(SubGhzProtocolEncoderFordV2* instance) {
     ford_v2_encoder_rebuild_raw_from_payload(instance);
 
+    // [PROTOPIRATE_PORT] custom_btn support
+    // Ford V2 mapping: Up=0x11 (Unlock), OK=0x10 (Lock), Down=0x13 (Trunk),
+    // Left=0x14 (Panic), Right=0x15 (RemoteStart).
+    {
+        const uint8_t original_btn = instance->raw_bytes[6];
+        if(subghz_custom_btn_get_original() == 0) {
+            subghz_custom_btn_set_original(original_btn);
+        }
+        subghz_custom_btn_set_max(5);
+        uint8_t custom_btn_id = subghz_custom_btn_get();
+        uint8_t new_btn = original_btn;
+        switch(custom_btn_id) {
+        case SUBGHZ_CUSTOM_BTN_UP:    new_btn = 0x11U; break;
+        // [BUGFIX] OK = default post-load; replay captured button (do not
+        // overwrite to 0x10 unconditionally).
+        case SUBGHZ_CUSTOM_BTN_OK:    new_btn = original_btn; break;
+        case SUBGHZ_CUSTOM_BTN_DOWN:  new_btn = 0x13U; break;
+        case SUBGHZ_CUSTOM_BTN_LEFT:  new_btn = 0x14U; break;
+        case SUBGHZ_CUSTOM_BTN_RIGHT: new_btn = 0x15U; break;
+        default:                      new_btn = original_btn; break;
+        }
+        if(new_btn != original_btn) {
+            instance->raw_bytes[6] = new_btn;
+            /* Repatch parity bit in raw_bytes[7] (mirrors rebuild logic) */
+            const uint8_t k7_msb = (uint8_t)(ford_v2_uint8_parity(new_btn) << 7);
+            instance->raw_bytes[7] = (instance->raw_bytes[7] & 0x7FU) | k7_msb;
+        }
+    }
+
     if(!ford_v2_button_is_valid(instance->raw_bytes[6])) {
         return SubGhzProtocolStatusErrorParserOthers;
     }
@@ -556,7 +595,9 @@ LevelDuration subghz_protocol_encoder_ford_v2_yield(void* context) {
 
     if(++instance->encoder.front == instance->encoder.size_upload) {
         instance->encoder.front = 0U;
-        instance->encoder.repeat--;
+        // Endless/breakless TX: while OK is held (endless_tx set by the transmit
+        // scene) do not consume repeats, so the signal loops until release.
+        if(!subghz_block_generic_global.endless_tx) instance->encoder.repeat--;
     }
 
     return ret;
@@ -747,11 +788,9 @@ void subghz_protocol_decoder_ford_v2_get_string(void* context, FuriString* outpu
     furi_string_cat_printf(
         output,
         "%s %dbit\r\n"
-        "Key:%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X\r\n"
-        "Sn:%08lX Btn:%02X [%s]\r\n"
-        "Cnt:%u Struct:%s\r\n"
-        "Tail31:%08lX\r\n"
-        "TailRaw:%02X%02X%02X%02X%02X\r\n",
+        "Key:%02X%02X%02X%02X%02X%02X\r\n"
+        "SN:0x%lX Btn:[%s]\r\n"
+        "Cnt:%u\r\n",
         instance->generic.protocol_name,
         (int)instance->generic.data_count_bit,
         k[2],
@@ -760,22 +799,9 @@ void subghz_protocol_decoder_ford_v2_get_string(void* context, FuriString* outpu
         k[5],
         k[6],
         k[7],
-        k[8],
-        k[9],
-        k[10],
-        k[11],
-        k[12],
         (unsigned long)instance->generic.serial,
-        instance->generic.btn,
         ford_v2_button_name(instance->generic.btn),
-        (unsigned)instance->counter16,
-        instance->structure_ok ? "OK" : "BAD",
-        (unsigned long)instance->tail31,
-        k[8],
-        k[9],
-        k[10],
-        k[11],
-        k[12]);
+        (unsigned)instance->counter16);
 }
 
 const SubGhzProtocolDecoder subghz_protocol_ford_v2_decoder = {

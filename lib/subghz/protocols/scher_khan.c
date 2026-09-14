@@ -255,8 +255,8 @@ const SubGhzProtocolEncoder subghz_protocol_scher_khan_encoder = {
 const SubGhzProtocol subghz_protocol_scher_khan = {
     .name = SUBGHZ_PROTOCOL_SCHER_KHAN_NAME,
     .type = SubGhzProtocolTypeDynamic,
-    .flag = SubGhzProtocolFlag_433 | SubGhzProtocolFlag_FM | SubGhzProtocolFlag_AM |
-            SubGhzProtocolFlag_Decodable |
+    .flag = SubGhzProtocolFlag_315 | SubGhzProtocolFlag_433 | SubGhzProtocolFlag_FM |
+            SubGhzProtocolFlag_AM | SubGhzProtocolFlag_Decodable |
             SubGhzProtocolFlag_Load | SubGhzProtocolFlag_Save | SubGhzProtocolFlag_Send,
 
     .decoder = &subghz_protocol_scher_khan_decoder,
@@ -1043,15 +1043,13 @@ void subghz_protocol_decoder_scher_khan_get_string(void* context, FuriString* ou
         output,
         "%s %dbit\r\n"
         "Key:0x%lX%08lX\r\n"
-        "Sn:%07lX Btn:[%s]\r\n"
-        "Cntr:%04lX\r\n"
-        "Pt: %s\r\n",
+        "SN:0x%lX Btn:[%s]\r\n"
+        "Cnt:%04lX",
         instance->generic.protocol_name,
         instance->generic.data_count_bit,
         (uint32_t)(instance->generic.data >> 32),
         (uint32_t)instance->generic.data,
         instance->generic.serial,
         scher_khan_btn_name(scher_khan_get_btn_code(instance->generic.btn)),
-        instance->generic.cnt,
-        instance->protocol_name);
+        instance->generic.cnt);
 }

@@ -4,6 +4,7 @@
 #include "../blocks/encoder.h"
 #include "../blocks/generic.h"
 #include "../blocks/math.h"
+#include "../blocks/custom_btn_i.h"
 #include <string.h>
 
 #define TAG "HondaV2"
@@ -95,7 +96,6 @@ static uint64_t honda_v2_bytes_to_u64_be(const uint8_t bytes[8]) {
 }
 
 static uint8_t honda_v2_button_from_signature(uint32_t signature);
-static const char* honda_v2_button_name(uint8_t button);
 static uint8_t honda_v2_calculate_check(uint32_t count);
 static bool honda_v2_calculate_tail_msb(uint32_t count);
 static uint16_t honda_v2_calculate_tail(uint32_t count);
@@ -152,17 +152,6 @@ static uint8_t honda_v2_button_from_signature(uint32_t signature) {
         return HONDA_V2_BTN_LOCK;
     }
     return HONDA_V2_BTN_UNKNOWN;
-}
-
-static const char* honda_v2_button_name(uint8_t button) {
-    switch(button) {
-    case HONDA_V2_BTN_LOCK:
-        return "Lock";
-    case HONDA_V2_BTN_UNLOCK:
-        return "Unlock";
-    default:
-        return "Unknown";
-    }
 }
 
 static uint8_t honda_v2_calculate_check(uint32_t count) {
@@ -724,6 +713,17 @@ SubGhzProtocolStatus subghz_protocol_decoder_honda_v2_deserialize(
     return ret;
 }
 
+static const char* honda_v2_button_name(uint8_t button) {
+    switch(button) {
+    case HONDA_V2_BTN_LOCK:
+        return "Lock";
+    case HONDA_V2_BTN_UNLOCK:
+        return "Unlock";
+    default:
+        return "Unknown";
+    }
+}
+
 void subghz_protocol_decoder_honda_v2_get_string(void* context, FuriString* output) {
     furi_check(context);
     SubGhzProtocolDecoderHondaV2* instance = context;
@@ -732,21 +732,16 @@ void subghz_protocol_decoder_honda_v2_get_string(void* context, FuriString* outp
         output,
         "%s %dbit\r\n"
         "Key:%016llX\r\n"
-        "Sn:%06lX  Btn:%02X - %s\r\n"
-        "BtnSig:%06lX\r\n"
-        "Cnt:%05lX  Chk:%02X [%s]  Tail:%05lX [%s]\r\n",
+        "SN:%06lX Btn:[%s]\r\n"
+        "CRC:%02X [%s] Cnt:%05lX",
         instance->generic.protocol_name,
         instance->generic.data_count_bit,
         (unsigned long long)instance->key,
         (unsigned long)instance->serial,
-        instance->button,
         honda_v2_button_name(instance->button),
-        (unsigned long)instance->command_signature,
-        (unsigned long)instance->count,
         instance->check,
         instance->check_ok ? "OK" : "BAD",
-        (unsigned long)(((instance->tail >> 15) & 1U) ? 0x1FFFFUL : 0x0FFFFUL),
-        instance->tail_ok ? "OK" : "BAD");
+        (unsigned long)instance->count);
 }
 
 void* subghz_protocol_encoder_honda_v2_alloc(SubGhzEnvironment* environment) {
@@ -852,6 +847,34 @@ SubGhzProtocolStatus subghz_protocol_encoder_honda_v2_deserialize(
         flipper_format_rewind(flipper_format);
         if(flipper_format_read_uint32(flipper_format, HONDA_V2_FF_BTNSIG, &u32, 1)) {
             instance->command_signature = u32 & 0xFFFFFFU;
+        }
+
+        // [PROTOPIRATE_PORT] custom_btn support
+        // Honda V2 has only two real buttons:
+        //   Up   = 0x02 (Lock)
+        //   Down = 0x04 (Unlock)
+        //   OK   = original captured button (byte-identical replay)
+        //   Left/Right unsupported -> fall through to original.
+        {
+            const uint8_t original_btn = instance->button;
+            if(subghz_custom_btn_get_original() == 0) {
+                subghz_custom_btn_set_original(original_btn);
+            }
+            subghz_custom_btn_set_max(4);
+            uint8_t custom_btn_id = subghz_custom_btn_get();
+            uint8_t remapped = original_btn;
+            switch(custom_btn_id) {
+            case SUBGHZ_CUSTOM_BTN_UP:   remapped = HONDA_V2_BTN_LOCK;   break;
+            case SUBGHZ_CUSTOM_BTN_OK:   remapped = original_btn;        break;
+            case SUBGHZ_CUSTOM_BTN_DOWN: remapped = HONDA_V2_BTN_UNLOCK; break;
+            default:                     remapped = original_btn;        break;
+            }
+            // Only accept the remap if it maps to a known signature; otherwise
+            // keep the original captured button so replay stays valid.
+            if(honda_v2_signature_from_button(remapped) != 0U) {
+                instance->button = remapped;
+                have_button = true;
+            }
         }
 
         if(have_button) {
@@ -965,7 +988,9 @@ LevelDuration subghz_protocol_encoder_honda_v2_yield(void* context) {
     LevelDuration duration = instance->encoder.upload[instance->encoder.front];
 
     if(++instance->encoder.front == instance->encoder.size_upload) {
-        instance->encoder.repeat--;
+        // Endless/breakless TX: while OK is held (endless_tx set by the transmit
+        // scene) do not consume repeats, so the signal loops until release.
+        if(!subghz_block_generic_global.endless_tx) instance->encoder.repeat--;
         instance->encoder.front = 0;
     }
 
