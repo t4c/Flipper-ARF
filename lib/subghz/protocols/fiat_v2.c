@@ -157,6 +157,26 @@ static const char* fiat_v2_button_name(uint8_t button) {
     }
 }
 
+// [PROTOPIRATE_PORT] custom_btn UI support
+// Maps the current D-pad selection to a Fiat V2 selector (1/2/3), mirroring the
+// encoder remap (fiat_v2_dpad_selector): Up=Unlock(3), Down=Lock(2),
+// Left=Trunk(1), Right/OK=captured. Used by get_string so the transmitter UI
+// shows the selected button, not the captured one.
+static uint8_t fiat_v2_ui_selector(uint8_t custom_btn_id, uint8_t original_selector) {
+    switch(custom_btn_id) {
+    case SUBGHZ_CUSTOM_BTN_UP:
+        return FIAT_V2_BUTTON_UNLOCK; // 3
+    case SUBGHZ_CUSTOM_BTN_DOWN:
+        return FIAT_V2_BUTTON_LOCK; // 2
+    case SUBGHZ_CUSTOM_BTN_LEFT:
+        return FIAT_V2_BUTTON_TRUNK; // 1
+    case SUBGHZ_CUSTOM_BTN_RIGHT:
+    case SUBGHZ_CUSTOM_BTN_OK:
+    default:
+        return original_selector;
+    }
+}
+
 static uint32_t fiat_v2_uid(const uint8_t raw[FIAT_V2_WIRE_BYTES]) {
     return ((uint32_t)raw[2] << 24U) | ((uint32_t)raw[3] << 16U) |
            ((uint32_t)raw[4] << 8U) | raw[5];
@@ -640,6 +660,18 @@ void subghz_protocol_decoder_fiat_v2_get_string(void* context, FuriString* outpu
     // Key line: the 6-byte hitag2 key recovered by the Hitag2Hell attack, or
     // "?" when it has not been recovered yet (capture without a matching key).
     if(instance->hitag2_key_valid) {
+        // [BUGFIX UI] Re-derive the displayed button from the current D-pad
+        // selection. This get_string draws the transmitter UI, so it must
+        // reflect subghz_custom_btn_get() (like psa.c/star_line.c). The D-pad is
+        // only meaningful when the Hitag2 key is available (the encoder can only
+        // forward-encode a changed button then), so we only remap here.
+        subghz_custom_btn_set_max(3);
+        uint8_t original_selector =
+            (uint8_t)((instance->button >> FIAT_V2_BTN_SHIFT) & 0x03U);
+        uint8_t display_selector =
+            fiat_v2_ui_selector(subghz_custom_btn_get(), original_selector);
+        uint8_t display_btn =
+            (uint8_t)((instance->button & 0x3FU) | ((display_selector & 0x03U) << FIAT_V2_BTN_SHIFT));
         furi_string_cat_printf(
             output,
             "%s %ubit\r\n"
@@ -655,7 +687,7 @@ void subghz_protocol_decoder_fiat_v2_get_string(void* context, FuriString* outpu
             instance->hitag2_key[4],
             instance->hitag2_key[5],
             (unsigned long)instance->uid,
-            fiat_v2_button_name(instance->button),
+            fiat_v2_button_name(display_btn),
             (unsigned long)instance->generic.cnt);
     } else {
         furi_string_cat_printf(
@@ -817,6 +849,29 @@ SubGhzProtocolStatus
     instance->generic.cnt = fiat_v2_counter(instance->raw_data);
     instance->epoch = 0U;
 
+    // [PROTOPIRATE_PORT] Honor the app-supplied "Serial"/"Btn"/"Cnt" overrides so
+    // the rolling counter actually advances on each TX. The car-emulate scene
+    // writes an incremented "Cnt" into the flipper_format before re-invoking this
+    // deserialize; without reading it back the counter would be re-derived from
+    // the (unchanged) captured Raw and the frame would be a byte-identical replay.
+    // This mirrors the KIA family template (kia_v6.c ~984). The hop is recomputed
+    // below from the honored counter when a key is available.
+    uint32_t override_cnt = 0U;
+    bool got_cnt = false;
+    {
+        uint32_t tmp = 0U;
+        flipper_format_rewind(flipper_format);
+        if(flipper_format_read_uint32(flipper_format, "Serial", &tmp, 1)) {
+            instance->generic.serial = tmp;
+        }
+        flipper_format_rewind(flipper_format);
+        if(flipper_format_read_uint32(flipper_format, "Cnt", &tmp, 1)) {
+            override_cnt = tmp;
+            got_cnt = true;
+            instance->generic.cnt = tmp;
+        }
+    }
+
     // [PROTOPIRATE_PORT] custom_btn support (consistent with the decoder).
     // Captured 2-bit selector (raw[7] bits 7:6); always nonzero for a valid
     // frame so the D-pad UI stays enabled. set_max(3): Trunk/Lock/Unlock.
@@ -874,20 +929,20 @@ SubGhzProtocolStatus
 
         const uint8_t new_selector =
             fiat_v2_dpad_selector(custom_btn_id, original_selector);
-        const bool dpad_changed =
-            (custom_btn_id != SUBGHZ_CUSTOM_BTN_OK) && (new_selector != original_selector);
 
-        // Compute the new counter. OK / no-change -> captured counter untouched
-        // (exact replay). Otherwise advance the rolling counter, honoring an
-        // explicit framework override if present (mirrors PSA / Fiat V1).
-        uint32_t new_counter = instance->generic.cnt;
-        if(dpad_changed) {
-            uint32_t override_cnt = 0U;
-            if(subghz_block_generic_global_counter_override_get(&override_cnt)) {
-                new_counter = override_cnt;
-            } else {
-                new_counter += (uint32_t)furi_hal_subghz_get_rolling_counter_mult();
-            }
+        // Counter is driven by the app: the car-emulate scene writes an
+        // incremented "Cnt" into the flipper_format before each TX, which we read
+        // into override_cnt above. Honor it directly (matching the KIA template).
+        // [ROLLING_CNT] When there is NO scene-supplied "Cnt" (plain transmitter
+        // OK/D-pad press), forward-encode the NEXT counter with the rolling
+        // multiplier so the UI shows an incrementing counter, matching VAG/PSA.
+        uint32_t new_counter;
+        if(got_cnt) {
+            new_counter = override_cnt;
+        } else {
+            uint32_t mult = furi_hal_subghz_get_rolling_counter_mult();
+            if(mult == 0U) mult = 1U;
+            new_counter = instance->generic.cnt + mult;
         }
 
         // Write the new button selector and counter into the raw. In non-FCA the
@@ -917,7 +972,12 @@ SubGhzProtocolStatus
             (unsigned long)instance->generic.cnt,
             (unsigned long)hop);
     } else {
-        // No key: byte-identical replay of the captured Raw.
+        // No key: cannot forward-encode a NEXT rolling code, so replay the
+        // captured Raw byte-identically. Re-derive the reported counter/button from
+        // the (unchanged) Raw so state stays truthful even if the app pushed a new
+        // "Cnt" that we could not apply without the Hitag2 key.
+        instance->generic.cnt = fiat_v2_counter(instance->raw_data);
+        instance->generic.btn = instance->raw_data[7];
         FURI_LOG_I(
             TAG,
             "TX(replay) UID:%08lX (no key, replaying captured frame)",
@@ -926,6 +986,19 @@ SubGhzProtocolStatus
 
     instance->generic.data =
         ((uint64_t)instance->generic.serial << 32U) | fiat_v2_hop(instance->raw_data);
+
+    // [ROLLING_CNT] Persist the advanced frame so the transmitter UI refresh
+    // (decoder deserialize reads "Raw") shows the incremented counter, and the
+    // next TX continues from the advanced value. Only when a key was available;
+    // the no-key path is byte-identical replay and must not mutate the file.
+    if(have_key) {
+        flipper_format_rewind(flipper_format);
+        flipper_format_insert_or_update_hex(
+            flipper_format, FIAT_V2_RAW_FIELD, instance->raw_data, FIAT_V2_WIRE_BYTES);
+        flipper_format_rewind(flipper_format);
+        uint32_t cnt_store = instance->generic.cnt;
+        flipper_format_insert_or_update_uint32(flipper_format, "Cnt", &cnt_store, 1);
+    }
 
     uint32_t repeat = FIAT_V2_ENC_DEFAULT_REPEAT;
     flipper_format_rewind(flipper_format);
