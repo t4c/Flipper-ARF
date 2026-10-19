@@ -38,5 +38,11 @@ bool protopirate_scene_receiver_config_on_event(void* context, SceneManagerEvent
 
 void protopirate_scene_receiver_config_on_exit(void* context) {
     ProtoPirateApp* app = context;
+    if(app->variable_item_list) {
+        view_dispatcher_switch_to_view(app->view_dispatcher, ProtoPirateViewSubmenu);
+        view_dispatcher_remove_view(app->view_dispatcher, ProtoPirateViewVariableItemList);
+        variable_item_list_free(app->variable_item_list);
+        app->variable_item_list = NULL;
+    }
     shared_plugin_unload(&app->running_plugin_flipper_application, &app->running_plugin);
 }

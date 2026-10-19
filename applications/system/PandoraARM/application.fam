@@ -3,7 +3,10 @@ App(
     name="Pandora ARM",
     apptype=FlipperAppType.EXTERNAL,
     entry_point="pandora_arm_app",
-    sources=["*.c*", "!lib", "!tests", "!hosttest"],
+    # hosttest.c and navtest.c are HOST-ONLY harnesses (each #includes main.c with
+    # mocked Flipper APIs and has its own main()); they must NOT be compiled into
+    # the FAP.
+    sources=["*.c*", "!lib", "!tests", "!hosttest", "!hosttest.c", "!navtest.c"],
     requires=["gui", "dialogs", "storage"],
     stack_size=8 * 1024,
     fap_private_libs=[
